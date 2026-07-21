@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -55,24 +55,34 @@ def build_fmodel_materials(
     images: FModelImageRepository,
     warn: Callable[[str], None],
     options: FModelMaterialImportOptions | None = None,
+    source_slot_to_blender_index: Mapping[int, int] | None = None,
 ) -> None:
-    """Build materials in serialized link order and resolve interfaces by ordinal."""
+    """Build materials using the explicit source-slot to Blender-index mapping."""
     options = options or FModelMaterialImportOptions()
     if not options.import_materials:
         return
-    processed_slots = set()
+    if source_slot_to_blender_index is None:
+        source_slot_to_blender_index = {
+            material.source_slot_index: blender_index
+            for blender_index, material in enumerate(lod_materials)
+            if material.source_slot_index is not None
+        }
+    source_slot_to_blender_index = _source_slot_to_blender_indices(
+        material_links.slots,
+        source_slot_to_blender_index,
+    )
     for slot in material_links.slots:
-        material_index = slot.slot_index
+        material_index = source_slot_to_blender_index[slot.slot_index]
         if material_index < 0 or material_index >= len(lod_materials):
-            warn(f"FModel material link slot {slot.slot_index} is out of range for LOD materials; skipping it")
-            continue
+            raise ValueError(
+                f"Invalid FModel material mapping: source slot {slot.slot_index} maps to "
+                f"Blender material index {material_index}, but the LOD has {len(lod_materials)} materials"
+            )
         if material_index >= len(mesh.materials) or mesh.materials[material_index] is None:
-            warn(f"FModel material link slot {slot.slot_index} has no Blender material; skipping it")
-            continue
-        if material_index in processed_slots:
-            warn(f"FModel material link slot {slot.slot_index} is duplicate; skipping it")
-            continue
-        processed_slots.add(material_index)
+            raise ValueError(
+                f"Invalid FModel material mapping: source slot {slot.slot_index} maps to "
+                f"missing Blender material index {material_index}"
+            )
         interfaces = [
             interface
             for interface in material_links.pbr_interfaces
@@ -99,6 +109,35 @@ def build_fmodel_materials(
             )
         else:
             _build_material(material, mesh, slot, images, warn, options)
+
+
+def _source_slot_to_blender_indices(slots, mapping: Mapping[int, int]) -> dict[int, int]:
+    """Validate source identities before they are used as Blender array indices."""
+    slot_indices = {slot.slot_index for slot in slots}
+    unknown_slots = set(mapping) - slot_indices
+    if unknown_slots:
+        raise ValueError(f"Invalid FModel material mapping: unknown source slot {min(unknown_slots)}")
+
+    resolved: dict[int, int] = {}
+    mapped_indices: dict[int, int] = {}
+    for slot in slots:
+        source_slot = slot.slot_index
+        if source_slot not in mapping:
+            raise ValueError(f"Invalid FModel material mapping: source slot {source_slot} has no Blender material mapping")
+        blender_index = mapping[source_slot]
+        if isinstance(blender_index, bool) or not isinstance(blender_index, int) or blender_index < 0:
+            raise ValueError(
+                f"Invalid FModel material mapping: source slot {source_slot} has invalid "
+                f"Blender material index {blender_index!r}"
+            )
+        if blender_index in mapped_indices:
+            raise ValueError(
+                f"Invalid FModel material mapping: source slot {source_slot} and source slot "
+                f"{mapped_indices[blender_index]} both map to duplicate Blender material index {blender_index}"
+            )
+        mapped_indices[blender_index] = source_slot
+        resolved[source_slot] = blender_index
+    return resolved
 
 
 def _material_link_metadata(slot, interfaces) -> dict[str, object]:

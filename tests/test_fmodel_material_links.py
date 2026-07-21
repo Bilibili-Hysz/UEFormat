@@ -670,6 +670,23 @@ class FModelImageIdentityTests(unittest.TestCase):
 
 
 class FModelMaterialBuilderPolicyTests(unittest.TestCase):
+    def test_source_slots_require_an_explicit_dense_blender_mapping(self):
+        slots = [
+            classes.FModelMaterialSlot(2, "Sparse", "", "", []),
+        ]
+
+        self.assertEqual(
+            material_builder._source_slot_to_blender_indices(slots, {2: 0}),
+            {2: 0},
+        )
+        with self.assertRaisesRegex(ValueError, "source slot 2 has no Blender material mapping"):
+            material_builder._source_slot_to_blender_indices(slots, {})
+        with self.assertRaisesRegex(ValueError, "duplicate Blender material index 0"):
+            material_builder._source_slot_to_blender_indices(
+                slots + [classes.FModelMaterialSlot(3, "Other", "", "", [])],
+                {2: 0, 3: 0},
+            )
+
     def test_v2_role_kind_compatibility_matches_builder_source_paths(self):
         for role in (1, 4):
             self.assertTrue(material_builder._v2_role_accepts_parameter(role, 1))
