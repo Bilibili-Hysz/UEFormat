@@ -13,6 +13,7 @@ from mathutils import Matrix, Quaternion, Vector
 from math import *
 
 from .reorient_utils import reorient_bones
+from .animation_time import animation_time_provenance, make_source_tick_converter
 from .fmodel import plan_fmodel_animation_binding, skeleton_identity_metadata
 
 from ..importer.classes import (
@@ -482,6 +483,23 @@ class UEFormatImport:
             (bone.name for bone in armature.pose.bones),
             strict=strict_skeleton,
         )
+        render = bpy.context.scene.render
+        effective_blender_fps = render.fps / render.fps_base
+        source_rate = (
+            data.metadata.frames_per_second
+            if data.metadata is not None
+            else effective_blender_fps
+        )
+        convert_source_tick = make_source_tick_converter(
+            source_rate,
+            render.fps,
+            render.fps_base,
+        )
+        time_provenance = animation_time_provenance(
+            source_rate,
+            render.fps,
+            render.fps_base,
+        )
         binding_issues = ([armature_identity_error] if armature_identity_error else []) + list(binding_plan.issues)
         if binding_issues:
             Log.warn(
@@ -508,6 +526,11 @@ class UEFormatImport:
             sort_keys=True,
         )
 
+        action["fmodel_animation_time"] = json.dumps(
+            time_provenance,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         if armature_anim_data := armature.animation_data:
             armature_anim_data.action = None
         
@@ -551,7 +574,7 @@ class UEFormatImport:
                 curves: list[FCurve],
                 vector: Vector | list[float] | Quaternion,
                 key_index: int,
-                frame: int,
+                frame: float,
             ) -> None:
                 for i in range(len(vector)):
                     curves[i].keyframe_points[key_index].co = frame, vector[i]
@@ -570,10 +593,10 @@ class UEFormatImport:
                     pos -= orig_loc
                     pos.rotate(post_quat.conjugated())
 
-                    add_key(loc_curves, pos, index, key.frame)
+                    add_key(loc_curves, pos, index, convert_source_tick(key.frame))
 
                 for index, key in enumerate(track.scale_keys):
-                    add_key(scale_curves, key.value, index, key.frame)
+                    add_key(scale_curves, key.value, index, convert_source_tick(key.frame))
 
             rot_curves = create_fcurves("rotation_quaternion", 4, len(track.rotation_keys), bone)
             for index, key in enumerate(track.rotation_keys):
@@ -589,7 +612,7 @@ class UEFormatImport:
                 q.rotate(p_quat)
                 quat.rotate(q.conjugated())
 
-                add_key(rot_curves, quat, index, key.frame)
+                add_key(rot_curves, quat, index, convert_source_tick(key.frame))
 
             bone.matrix_basis.identity()  # type: ignore[reportAttributeAccessIssue]
 
@@ -601,6 +624,11 @@ class UEFormatImport:
                     shape_key_anim_data.action = None
     
                 shape_keys_action = bpy.data.actions.new(name=f"{name}_Curves")
+                shape_keys_action["fmodel_animation_time"] = json.dumps(
+                    time_provenance,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
                 
                 if self.options.link:
                     shape_keys.animation_data_create()
@@ -617,7 +645,10 @@ class UEFormatImport:
                         
                     for key in curve.keys:
                         shape_key.value = key.value
-                        shape_key.keyframe_insert(data_path="value", frame=key.frame)
+                        shape_key.keyframe_insert(
+                            data_path="value",
+                            frame=convert_source_tick(key.frame),
+                        )
 
         return action, data
 
