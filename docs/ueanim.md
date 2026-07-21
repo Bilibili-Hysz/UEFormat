@@ -60,6 +60,14 @@ struct FFloatKey
 }
 ```
 
+`Frame` in every bone and curve key is a source animation tick. The
+`FramesPerSecond` metadata field is the number of source ticks per wall-clock
+second; it is not an instruction to overwrite the Blender scene frame rate.
+The Blender importer preserves duration by mapping each key with
+`blender_frame = source_tick * (scene_fps / scene_fps_base) / FramesPerSecond`.
+Bone and morph keys use the same mapping. Imported Actions store this policy,
+the source rate, and the effective Blender rate in `fmodel_animation_time`.
+
 ### `EAdditiveAnimationType`
 
 | Value | Name |
