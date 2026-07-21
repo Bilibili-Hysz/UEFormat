@@ -1,0 +1,584 @@
+"""Build conservative Blender materials from FModel material-link records."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import bpy
+
+from .classes import FModelMaterialLinks
+from .fmodel import material_links_metadata
+
+if TYPE_CHECKING:
+    from .classes import FModelMaterialLinks, FModelMaterialParameter, Material
+    from .material_images import FModelImageRepository
+
+
+_COLOR_SEMANTICS = {"base_color", "emissive"}
+_DATA_SEMANTICS = {"normal", "roughness", "metallic"}
+# V2 wire roles have distinct source contracts. Color roles can be sampled or
+# supplied as vectors, Normal/AO are sampled textures, and value paths consume
+# scalar or vector parameters.
+_V2_COLOR_ROLES = {1, 4}
+_V2_TEXTURE_ROLES = {3, 10}
+_V2_VALUE_ROLES = {2, 5, 6, 7, 8, 9, 11, 12}
+
+
+def _socket_by_identifier(sockets, identifier):
+    """Resolve Blender shader sockets by stable identifier, not UI position/label."""
+    for socket in sockets:
+        if socket.identifier == identifier:
+            return socket
+    raise KeyError(f"Blender socket identifier {identifier!r} was not found")
+
+
+@dataclass(frozen=True, slots=True)
+class FModelMaterialImportOptions:
+    """Controls Blender-side construction without changing material-link metadata."""
+
+    import_materials: bool = True
+    build_nodes: bool = True
+    load_embedded: bool = True
+    load_external: bool = True
+    keep_unmapped: bool = True
+    ue_export_root: str | None = None
+    bundle_root: str | None = None
+
+
+def build_fmodel_materials(
+    mesh: bpy.types.Mesh,
+    lod_materials: Sequence[Material],
+    material_links: FModelMaterialLinks,
+    images: FModelImageRepository,
+    warn: Callable[[str], None],
+    options: FModelMaterialImportOptions | None = None,
+) -> None:
+    """Build materials in serialized link order and resolve interfaces by ordinal."""
+    options = options or FModelMaterialImportOptions()
+    if not options.import_materials:
+        return
+    processed_slots = set()
+    for slot in material_links.slots:
+        material_index = slot.slot_index
+        if material_index < 0 or material_index >= len(lod_materials):
+            warn(f"FModel material link slot {slot.slot_index} is out of range for LOD materials; skipping it")
+            continue
+        if material_index >= len(mesh.materials) or mesh.materials[material_index] is None:
+            warn(f"FModel material link slot {slot.slot_index} has no Blender material; skipping it")
+            continue
+        if material_index in processed_slots:
+            warn(f"FModel material link slot {slot.slot_index} is duplicate; skipping it")
+            continue
+        processed_slots.add(material_index)
+        interfaces = [
+            interface
+            for interface in material_links.pbr_interfaces
+            if interface.slot_index == slot.slot_index
+        ]
+        material = mesh.materials[material_index]
+        if not options.build_nodes:
+            _attach_provenance(material, slot, interfaces)
+            continue
+        existing = _find_matching_material(slot, interfaces, images, options)
+        if existing is not None:
+            mesh.materials[material_index] = existing
+            if material.get("fmodel_importer_owned") and material.users == 0:
+                bpy.data.materials.remove(material)
+            continue
+        if not _prevalidate_material(mesh, slot, interfaces, images, warn, options):
+            continue
+        material = _isolated_build_material(mesh, material_index, material)
+        material.name = f"{_material_display_name(slot)} (FModel)"
+        _attach_provenance(material, slot, interfaces, options, images)
+        if interfaces:
+            _build_v2_material(
+                material, mesh, slot, interfaces, images, warn, options
+            )
+        else:
+            _build_material(material, mesh, slot, images, warn, options)
+
+
+def _material_link_metadata(slot, interfaces) -> dict[str, object]:
+    slot_links = FModelMaterialLinks(slots=[slot], pbr_interfaces=list(interfaces))
+    metadata = material_links_metadata(slot_links)
+    return {
+        "version": 2 if interfaces else 1,
+        **metadata["slots"][0],
+        **({"pbr_interfaces": metadata["pbr_interfaces"]} if interfaces else {}),
+    }
+
+
+def _material_build_profile(options) -> str:
+    return json.dumps({
+        "build_nodes": options.build_nodes,
+        "load_embedded": options.load_embedded,
+        "load_external": options.load_external,
+        "keep_unmapped": options.keep_unmapped,
+    }, separators=(",", ":"), sort_keys=True)
+
+
+def _material_cache_identity(slot, interfaces, images, options=None) -> str:
+    options = options or FModelMaterialImportOptions()
+    roles_by_parameter, _ = _v2_roles_by_parameter(slot, interfaces)
+    parameters = []
+    for index, parameter in enumerate(slot.parameters):
+        if parameter.kind != 1:
+            parameters.append((parameter.name, parameter.kind, parameter.semantic, parameter.value))
+            continue
+        mode = parameter.texture.location_mode
+        if (mode == 3 and not options.load_embedded) or (mode in {1, 2} and not options.load_external):
+            continue
+        roles = roles_by_parameter.get(index, [])
+        interpretations = (
+            ("COLOR", "DATA")
+            if any(role in {1, 4} for role in roles) and any(role not in {1, 4} for role in roles)
+            else ("COLOR",) if any(role in {1, 4} for role in roles) or (not interfaces and parameter.semantic.lower() in _COLOR_SEMANTICS)
+            else ("DATA",)
+        )
+        parameters.append((
+            parameter.name,
+            parameter.kind,
+            parameter.semantic,
+            parameter.texture.color_space,
+            parameter.texture.packing,
+            parameter.texture.uv_set,
+            tuple(images.resource_cache_key(parameter, interpretation) for interpretation in interpretations),
+        ))
+    return json.dumps({
+        "material": slot.unreal_material_path.strip().replace("\\", "/"),
+        "parameters": parameters,
+        "interfaces": [(item.parameter_index, item.role) for item in interfaces],
+    }, separators=(",", ":"), sort_keys=True)
+
+
+def _find_matching_material(slot, interfaces, images, options):
+    try:
+        expected_identity = _material_cache_identity(slot, interfaces, images, options)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    expected_profile = _material_build_profile(options)
+    for material in bpy.data.materials:
+        if not material.get("fmodel_importer_owned") or material.get("fmodel_material_build_profile") != expected_profile:
+            continue
+        if material.get("fmodel_material_cache_identity") == expected_identity:
+            return material
+    return None
+
+
+def _attach_provenance(material, slot, interfaces, options=None, images=None) -> None:
+    material["fmodel_material_link"] = json.dumps(_material_link_metadata(slot, interfaces))
+    if options is not None:
+        material["fmodel_material_build_profile"] = _material_build_profile(options)
+    if images is not None:
+        try:
+            material["fmodel_material_cache_identity"] = _material_cache_identity(slot, interfaces, images, options)
+        except (OSError, RuntimeError, ValueError):
+            material.pop("fmodel_material_cache_identity", None)
+    metadata = material_links_metadata(FModelMaterialLinks(slots=[slot], pbr_interfaces=list(interfaces)))
+    material["fmodel_parameter_metadata"] = json.dumps([
+        parameter for parameter in metadata["slots"][0]["parameters"] if parameter["kind"] in {2, 3}
+    ])
+
+
+def _isolated_build_material(mesh, material_index, material):
+    """Only single-user importer-owned materials may be rebuilt in place."""
+    if not material.get("fmodel_importer_owned") or material.users > 1:
+        material = material.copy()
+        material.name = f"{material.name} (FModel)"
+        mesh.materials[material_index] = material
+    material["fmodel_importer_owned"] = True
+    return material
+
+
+def _material_display_name(slot) -> str:
+    """Prefer the resolved Unreal material identity over the mesh's legacy slot label."""
+    path = slot.unreal_material_path.replace("\\", "/").rsplit("/", 1)[-1]
+    return path.rsplit(".", 1)[-1] if path else slot.slot_name or "Material"
+
+
+def _prevalidate_material(mesh, slot, interfaces, images, warn, options) -> bool:
+    """Require one viable source before replacing an importer-owned graph."""
+    roles_by_parameter, invalid_roles_by_parameter = _v2_roles_by_parameter(slot, interfaces, warn)
+    viable = False
+    for index, parameter in enumerate(slot.parameters):
+        roles = roles_by_parameter.get(index, [])
+        invalid_roles = invalid_roles_by_parameter.get(index, [])
+        if parameter.kind != 1:
+            viable = True
+            continue
+        semantic = parameter.semantic.lower()
+        if interfaces and roles and not invalid_roles and not options.keep_unmapped:
+            continue
+        if not interfaces and semantic not in {"normal", "base_color", "emissive", "roughness", "metallic"} and not options.keep_unmapped:
+            continue
+        if interfaces and not roles and not options.keep_unmapped:
+            continue
+        if parameter.texture.location_mode == 3 and not options.load_embedded:
+            viable = True
+            continue
+        if parameter.texture.location_mode in {1, 2} and not options.load_external:
+            viable = True
+            continue
+        if mesh.uv_layers.get(f"UV{parameter.texture.uv_set}") is None:
+            warn(
+                f"FModel texture parameter {parameter.name!r} declares UV{parameter.texture.uv_set}, "
+                "which is missing; skipping texture node to avoid implicit active-UV sampling"
+            )
+            continue
+        interpretation = "COLOR" if (not interfaces and semantic in _COLOR_SEMANTICS) or any(role in {1, 4} for role in roles) else "DATA"
+        if _load_image(parameter, "base_color" if interpretation == "COLOR" else "data", images, warn) is not None:
+            viable = True
+    return viable
+
+
+def _v2_role_accepts_parameter(role: int, kind: int) -> bool:
+    """Return whether a V2 role can use this serialized parameter wire kind."""
+    if role in _V2_COLOR_ROLES:
+        return kind in {1, 3}
+    if role in _V2_TEXTURE_ROLES:
+        return kind == 1
+    if role in _V2_VALUE_ROLES:
+        return kind in {2, 3}
+    return False
+
+
+def _v2_roles_by_parameter(slot, interfaces, warn=None):
+    """Classify interfaces before graph construction and retain invalid sources."""
+    roles_by_parameter = {}
+    invalid_roles_by_parameter = {}
+    for interface in interfaces:
+        parameter = slot.parameters[interface.parameter_index]
+        if _v2_role_accepts_parameter(interface.role, parameter.kind):
+            roles_by_parameter.setdefault(interface.parameter_index, []).append(interface.role)
+            continue
+        invalid_roles_by_parameter.setdefault(interface.parameter_index, []).append(interface.role)
+        if warn is not None:
+            warn(
+                f"FModel parameter {parameter.name!r} role {interface.role} is incompatible with parameter kind {parameter.kind}; preserving it as Custom"
+            )
+    return roles_by_parameter, invalid_roles_by_parameter
+
+
+def _build_material(material, mesh, slot, images, warn, options) -> None:
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+    output = nodes.new("ShaderNodeOutputMaterial")
+    output.location = (620, 0)
+    principled = nodes.new("ShaderNodeBsdfPrincipled")
+    principled.location = (360, 0)
+    links.new(principled.outputs["BSDF"], output.inputs["Surface"])
+    unmapped_frame = None
+
+    for parameter in slot.parameters:
+        if parameter.kind != 1:
+            continue
+        semantic = parameter.semantic.lower()
+        location_mode = parameter.texture.location_mode
+        if location_mode == 3 and not options.load_embedded:
+            warn(f"FModel texture parameter {parameter.name!r} skipped: embedded textures disabled")
+            continue
+        if location_mode in {1, 2} and not options.load_external:
+            warn(f"FModel texture parameter {parameter.name!r} skipped: external textures disabled")
+            continue
+        if semantic not in {"normal", "base_color", "emissive", "roughness", "metallic"} and not options.keep_unmapped:
+            continue
+        image = _load_image(parameter, semantic, images, warn)
+        if image is None:
+            continue
+        if not _link_uv(mesh, parameter, None, nodes, links):
+            warn(
+                f"FModel texture parameter {parameter.name!r} declares UV{parameter.texture.uv_set}, "
+                "which is missing; skipping texture node to avoid implicit active-UV sampling"
+            )
+            continue
+        texture = nodes.new("ShaderNodeTexImage")
+        texture.label = parameter.name
+        texture.name = parameter.name
+        texture.image = image
+        texture.location = (-260, -220 * len(nodes))
+        _link_uv(mesh, parameter, texture, nodes, links)
+        if semantic == "normal":
+            normal_map = nodes.new("ShaderNodeNormalMap")
+            normal_map.location = (110, texture.location.y)
+            links.new(texture.outputs["Color"], normal_map.inputs["Color"])
+            links.new(normal_map.outputs["Normal"], principled.inputs["Normal"])
+        elif semantic in {"base_color", "emissive", "roughness", "metallic"}:
+            target_socket = {
+                "base_color": "Base Color",
+                "emissive": "Emission Color",
+                "roughness": "Roughness",
+                "metallic": "Metallic",
+            }[semantic]
+            links.new(texture.outputs["Color"], principled.inputs[target_socket])
+        else:
+            if unmapped_frame is None:
+                unmapped_frame = nodes.new("NodeFrame")
+                unmapped_frame.label = "FModel Unmapped Parameters"
+                unmapped_frame.name = unmapped_frame.label
+            texture.parent = unmapped_frame
+
+
+def _load_image(parameter: FModelMaterialParameter, semantic: str, images: FModelImageRepository, warn):
+    interpretation = "COLOR" if semantic in _COLOR_SEMANTICS else "DATA"
+    try:
+        return images.get_image(parameter, interpretation)
+    except (OSError, RuntimeError, ValueError) as exc:
+        warn(f"FModel texture parameter {parameter.name!r} could not be resolved: {exc}")
+        return None
+
+
+def _link_uv(mesh, parameter: FModelMaterialParameter, texture, nodes, links) -> bool:
+    uv_name = f"UV{parameter.texture.uv_set}"
+    if mesh.uv_layers.get(uv_name) is None:
+        return False
+    if texture is None:
+        return True
+    uv_map = nodes.new("ShaderNodeUVMap")
+    uv_map.uv_map = uv_name
+    uv_map.label = uv_name
+    uv_map.location = (texture.location.x - 220, texture.location.y)
+    links.new(uv_map.outputs["UV"], texture.inputs["Vector"])
+    return True
+
+
+def _build_v2_material(material, mesh, slot, interfaces, images, warn, options) -> None:
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+
+    custom_frame = nodes.new("NodeFrame")
+    custom_frame.label = "Custom / Unmapped (Preserved)"
+    custom_frame.name = custom_frame.label
+    custom_frame.location = (-1100, 0)
+    custom_frame.shrink = True
+    custom_frame.use_custom_color = True
+    custom_frame.color = (0.16, 0.24, 0.34)
+    pbr_frame = nodes.new("NodeFrame")
+    pbr_frame.label = "PBR Inputs"
+    pbr_frame.name = pbr_frame.label
+    pbr_frame.location = (-420, 0)
+    pbr_frame.shrink = True
+    pbr_frame.use_custom_color = True
+    pbr_frame.color = (0.18, 0.36, 0.22)
+
+    principled = nodes.new("ShaderNodeBsdfPrincipled")
+    principled.location = (360, 0)
+    output = nodes.new("ShaderNodeOutputMaterial")
+    output.location = (660, 0)
+    links.new(principled.outputs["BSDF"], output.inputs["Surface"])
+
+    roles_by_parameter, invalid_roles_by_parameter = _v2_roles_by_parameter(slot, interfaces)
+
+    role_order = {1: 0, 3: 1, 10: 2, 4: 3, 9: 4}
+    ordered_indices = sorted(
+        range(len(slot.parameters)),
+        key=lambda index: (
+            0 if roles_by_parameter.get(index) else 1,
+            min((role_order.get(role, 5) for role in roles_by_parameter.get(index, [])), default=5),
+            index,
+        ),
+    )
+    parameter_nodes = {}
+    uv_nodes = {}
+    SOURCE_ROW_SPACING = 320
+    PROCESSING_ROW_SPACING = 160
+    pbr_y = 0
+    custom_y = 0
+    for parameter_index in ordered_indices:
+        parameter = slot.parameters[parameter_index]
+        roles = roles_by_parameter.get(parameter_index, [])
+        has_invalid_roles = parameter_index in invalid_roles_by_parameter
+        if parameter.kind == 1:
+            if not roles and not has_invalid_roles and not options.keep_unmapped:
+                continue
+            location_mode = parameter.texture.location_mode
+            if location_mode == 3 and not options.load_embedded:
+                warn(f"FModel texture parameter {parameter.name!r} skipped: embedded textures disabled")
+                continue
+            if location_mode in {1, 2} and not options.load_external:
+                warn(f"FModel texture parameter {parameter.name!r} skipped: external textures disabled")
+                continue
+            uv_name = f"UV{parameter.texture.uv_set}"
+            frame = pbr_frame if roles else custom_frame
+            if mesh.uv_layers.get(uv_name) is None:
+                warn(
+                    f"FModel texture parameter {parameter.name!r} declares UV{parameter.texture.uv_set}, "
+                    "which is missing; skipping texture node to avoid implicit active-UV sampling"
+                )
+                continue
+            interpretations = (
+                ("COLOR", "DATA")
+                if any(role in {1, 4} for role in roles)
+                and any(role not in {1, 4} for role in roles)
+                else ("COLOR",) if any(role in {1, 4} for role in roles) else ("DATA",)
+            )
+            for interpretation in interpretations:
+                try:
+                    image = images.get_image(parameter, interpretation)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    warn(f"FModel texture parameter {parameter.name!r} could not be resolved: {exc}")
+                    continue
+                source_y = pbr_y if roles else custom_y
+                node = nodes.new("ShaderNodeTexImage")
+                node.name = f"{parameter.name} ({interpretation})"
+                node.label = f"{parameter.name} [{interpretation}]" if len(interpretations) > 1 else parameter.name
+                node.image = image
+                node.parent = frame
+                node.location = (0, source_y)
+                uv_node = uv_nodes.get((frame, uv_name))
+                if uv_node is None:
+                    uv_node = nodes.new("ShaderNodeUVMap")
+                    uv_node.uv_map = uv_name
+                    uv_node.label = uv_name
+                    uv_node.parent = frame
+                    uv_node.location = (-260, source_y)
+                    uv_nodes[(frame, uv_name)] = uv_node
+                links.new(uv_node.outputs["UV"], node.inputs["Vector"])
+                parameter_nodes[(parameter_index, interpretation)] = node
+                if node.parent == pbr_frame:
+                    pbr_y -= SOURCE_ROW_SPACING
+                else:
+                    custom_y -= SOURCE_ROW_SPACING
+            continue
+        elif roles or has_invalid_roles:
+            frame = pbr_frame if roles else custom_frame
+            source_y = pbr_y if roles else custom_y
+            node = nodes.new("ShaderNodeValue" if parameter.kind == 2 else "ShaderNodeRGB")
+            node.name = parameter.name
+            node.label = parameter.name
+            node.parent = frame
+            node.location = (0, source_y)
+            if parameter.kind == 2:
+                _socket_by_identifier(node.outputs, "Value").default_value = parameter.value
+            else:
+                _socket_by_identifier(node.outputs, "Color").default_value = parameter.value
+        else:
+            continue
+        parameter_nodes[(parameter_index, None)] = node
+        if node.parent == pbr_frame:
+            pbr_y -= SOURCE_ROW_SPACING
+        else:
+            custom_y -= SOURCE_ROW_SPACING
+
+    if parameter_nodes:
+        base_index = next(
+            (parameter_nodes.get((interface.parameter_index, "COLOR")) for interface in interfaces if interface.role == 1 and (interface.parameter_index, "COLOR") in parameter_nodes),
+            next((node for (index, interpretation), node in parameter_nodes.items() if interpretation in {"COLOR", "DATA"} and roles_by_parameter.get(index)), None),
+        )
+        if base_index is not None:
+            nodes.active = base_index
+
+    def source(role, *, red=False):
+        for interface in interfaces:
+            parameter = slot.parameters[interface.parameter_index]
+            interpretation = (
+                ("COLOR" if interface.role in {1, 4} else "DATA")
+                if parameter.kind == 1 else None
+            )
+            if (
+                interface.role == role
+                and interface.role in roles_by_parameter.get(interface.parameter_index, [])
+                and (interface.parameter_index, interpretation) in parameter_nodes
+            ):
+                node = parameter_nodes[(interface.parameter_index, interpretation)]
+                if red and node.type == "RGB":
+                    value = nodes.new("ShaderNodeValue")
+                    value.label = node.label
+                    _socket_by_identifier(value.outputs, "Value").default_value = slot.parameters[interface.parameter_index].value[0]
+                    value.parent = pbr_frame
+                    helper_y = node.location.y
+                    while any(abs(helper_y - used_y) < PROCESSING_ROW_SPACING for used_y in processing_y):
+                        helper_y -= PROCESSING_ROW_SPACING
+                    processing_y.append(helper_y)
+                    value.location = (260, helper_y)
+                    return _socket_by_identifier(value.outputs, "Value")
+                output_identifier = "Color" if node.type in {"RGB", "TEX_IMAGE"} else "Value"
+                return _socket_by_identifier(node.outputs, output_identifier)
+        return None
+
+    def multiply(a, b, *, factor=None, label=None):
+        if a is None:
+            return b
+        if b is None:
+            return a
+        mix = nodes.new("ShaderNodeMix")
+        mix.data_type = "RGBA"
+        mix.blend_type = "MULTIPLY"
+        if label is not None:
+            mix.label = label
+            mix.name = label
+        _socket_by_identifier(mix.inputs, "Factor_Float").default_value = 1.0 if factor is None else factor
+        mix.parent = pbr_frame
+        source_y = [socket.node.location.y for socket in (a, b)]
+        mix_y = sum(source_y) / len(source_y)
+        while any(abs(mix_y - used_y) < PROCESSING_ROW_SPACING for used_y in processing_y):
+            mix_y -= PROCESSING_ROW_SPACING
+        processing_y.append(mix_y)
+        mix.location = (260, mix_y)
+        links.new(a, _socket_by_identifier(mix.inputs, "A_Color"))
+        links.new(b, _socket_by_identifier(mix.inputs, "B_Color"))
+        return _socket_by_identifier(mix.outputs, "Result_Color")
+
+    processing_y = []
+    base = multiply(source(1), source(2), label="Base Factor Multiply")
+    ao = source(10)
+    if ao is not None:
+        ao = multiply(ao, source(11), label="AO Factor Multiply")
+        ao_strength = source(12, red=True)
+        if ao_strength is not None:
+            base = multiply(base, ao, factor=0.0, label="AO Multiply")
+            links.new(ao_strength, _socket_by_identifier(base.node.inputs, "Factor_Float"))
+        else:
+            base = multiply(base, ao)
+    if base is not None:
+        links.new(base, _socket_by_identifier(principled.inputs, "Base Color"))
+
+    normal = source(3)
+    if normal is not None:
+        normal_map = nodes.new("ShaderNodeNormalMap")
+        normal_map.label = "Normal Map"
+        normal_map.name = "Normal Map"
+        normal_map.parent = pbr_frame
+        normal_y = normal.node.location.y
+        while any(abs(normal_y - used_y) < PROCESSING_ROW_SPACING for used_y in processing_y):
+            normal_y -= PROCESSING_ROW_SPACING
+        processing_y.append(normal_y)
+        normal_map.location = (260, normal_y)
+        links.new(normal, _socket_by_identifier(normal_map.inputs, "Color"))
+        links.new(
+            _socket_by_identifier(normal_map.outputs, "Normal"),
+            _socket_by_identifier(principled.inputs, "Normal"),
+        )
+
+    emissive = multiply(source(4), source(5), label="Emissive Factor Multiply")
+    if emissive is not None:
+        links.new(emissive, _socket_by_identifier(principled.inputs, "Emission Color"))
+    strength = source(6, red=True)
+    if strength is not None:
+        links.new(strength, _socket_by_identifier(principled.inputs, "Emission Strength"))
+
+    roughness = source(9, red=True)
+    if roughness is None:
+        minimum = source(7, red=True)
+        maximum = source(8, red=True)
+        if minimum is not None and maximum is not None:
+            midpoint = nodes.new("ShaderNodeValue")
+            midpoint.label = "Roughness Midpoint"
+            midpoint.parent = pbr_frame
+            midpoint_y = (minimum.node.location.y + maximum.node.location.y) / 2
+            while any(abs(midpoint_y - used_y) < PROCESSING_ROW_SPACING for used_y in processing_y):
+                midpoint_y -= PROCESSING_ROW_SPACING
+            processing_y.append(midpoint_y)
+            midpoint.location = (260, midpoint_y)
+            _socket_by_identifier(midpoint.outputs, "Value").default_value = (
+                minimum.default_value + maximum.default_value
+            ) * 0.5
+            roughness = _socket_by_identifier(midpoint.outputs, "Value")
+    if roughness is not None:
+        links.new(roughness, _socket_by_identifier(principled.inputs, "Roughness"))
