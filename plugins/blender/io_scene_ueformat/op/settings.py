@@ -16,6 +16,7 @@ class UFSettings(PropertyGroup):
 
     rotation_only: BoolProperty(name="Rotation Only", default=False)
     import_curves: BoolProperty(name="Import Curves", default=True)
+    strict_fmodel_skeleton: BoolProperty(name="Strict FModel Skeleton", default=True)
 
     def get_props(self) -> dict[str, Any]:
         props = {}

@@ -40,6 +40,7 @@ class UEAnimOptions(UEFormatOptions):
     rotation_only: bool = False
     import_curves: bool = True
     override_skeleton: Armature | None = None
+    strict_fmodel_skeleton: bool = True
 
 @dataclass(slots=True)
 class UEPoseOptions(UEFormatOptions):

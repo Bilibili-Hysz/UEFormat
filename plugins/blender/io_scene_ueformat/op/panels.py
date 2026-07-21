@@ -59,6 +59,7 @@ class UEFORMAT_PT_Panel(Panel):  # noqa: N801
         box.label(text="Animation", icon="ACTION")
         box.row().prop(settings, "rotation_only")
         box.row().prop(settings, "import_curves")
+        box.row().prop(settings, "strict_fmodel_skeleton")
 
         if not import_menu:
             box.row().operator("uf.import_ueanim", icon="ANIM")

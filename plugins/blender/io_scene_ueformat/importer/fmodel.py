@@ -7,8 +7,9 @@ for embedded references.  It never loads images or creates Blender nodes.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Mapping
+from typing import Iterable, Mapping
 
 from .classes import FModelMaterialLinks, FModelSkeletonIdentity, FModelTargetSkeletonIdentity, TextureResource
 
@@ -16,6 +17,18 @@ from .classes import FModelMaterialLinks, FModelSkeletonIdentity, FModelTargetSk
 RELATIVE_LOCATION_MODE = 1
 BUNDLE_LOCATION_MODE = 2
 EMBEDDED_LOCATION_MODE = 3
+MAX_MISSING_ANIMATION_TRACK_RATIO = 0.10
+
+
+@dataclass(frozen=True, slots=True)
+class FModelAnimationBindingPlan:
+    bound_bone_names: tuple[str | None, ...]
+    bound_track_count: int
+    skipped_track_count: int
+    total_track_count: int
+    provenance_expected: bool
+    source_identity: dict[str, object] | None
+    issues: tuple[str, ...]
 
 
 class FModelResourceResolver:
@@ -163,6 +176,111 @@ def verify_fmodel_target_skeleton(
 
     if target_identity.get("bone_layout_hash") != armature_identity.get("bone_layout_hash"):
         raise ValueError("FModel target skeleton layout hash mismatch")
+
+
+def plan_fmodel_animation_binding(
+    target_identity: Mapping[str, object] | None,
+    armature_identity: Mapping[str, object] | None,
+    track_names: Iterable[str],
+    bone_names: Iterable[str],
+    *,
+    strict: bool = True,
+) -> FModelAnimationBindingPlan:
+    """Validate provenance and resolve animation tracks without Blender mutations."""
+    target = dict(target_identity) if target_identity is not None else None
+    armature = dict(armature_identity) if armature_identity is not None else None
+    provenance_expected = target is not None or armature is not None
+    issues: list[str] = []
+
+    if provenance_expected:
+        issues.extend(_identity_issues(target, "target", require_source_path=True))
+        issues.extend(_identity_issues(armature, "armature", require_source_path=False))
+        if not issues:
+            try:
+                verify_fmodel_target_skeleton(target, armature)  # type: ignore[arg-type]
+            except ValueError as exc:
+                issues.append(str(exc))
+
+    folded_bones: dict[str, list[str]] = {}
+    for bone_name in bone_names:
+        folded_bones.setdefault(bone_name.casefold(), []).append(bone_name)
+
+    bindings: list[str | None] = []
+    for track_name in track_names:
+        matches = folded_bones.get(track_name.casefold(), [])
+        if len(matches) > 1:
+            if provenance_expected:
+                issues.append(f"FModel animation bone match is ambiguous for track {track_name!r}")
+                bindings.append(None)
+            else:
+                bindings.append(matches[0])
+        else:
+            bindings.append(matches[0] if matches else None)
+
+    total = len(bindings)
+    bound = sum(binding is not None for binding in bindings)
+    skipped = total - bound
+    if provenance_expected and total and skipped / total > MAX_MISSING_ANIMATION_TRACK_RATIO:
+        issues.append(
+            f"FModel animation has {skipped} of {total} tracks missing or ambiguous "
+            f"(maximum {MAX_MISSING_ANIMATION_TRACK_RATIO:.0%})"
+        )
+
+    if strict and provenance_expected and issues:
+        raise ValueError("; ".join(issues))
+
+    return FModelAnimationBindingPlan(
+        bound_bone_names=tuple(bindings),
+        bound_track_count=bound,
+        skipped_track_count=skipped,
+        total_track_count=total,
+        provenance_expected=provenance_expected,
+        source_identity=target,
+        issues=tuple(issues),
+    )
+
+
+def _identity_issues(
+    identity: Mapping[str, object] | None,
+    label: str,
+    *,
+    require_source_path: bool,
+) -> list[str]:
+    if identity is None:
+        return [f"FModel {label} skeleton identity is missing"]
+    required = ("version", "skeleton_path", "has_skeleton_guid", "skeleton_guid", "bone_layout_hash")
+    if require_source_path:
+        required += ("source_animation_path",)
+    if any(field not in identity for field in required):
+        return [f"FModel {label} skeleton identity is malformed"]
+    valid = (
+        identity["version"] == 1
+        and isinstance(identity["skeleton_path"], str)
+        and bool(identity["skeleton_path"].strip())
+        and isinstance(identity["has_skeleton_guid"], bool)
+        and _is_hex_bytes(identity["bone_layout_hash"], 32)
+    )
+    if identity["has_skeleton_guid"]:
+        valid = valid and _is_hex_bytes(identity["skeleton_guid"], 16)
+    else:
+        valid = valid and identity["skeleton_guid"] is None
+    if require_source_path:
+        valid = (
+            valid
+            and isinstance(identity["source_animation_path"], str)
+            and bool(identity["source_animation_path"].strip())
+        )
+    return [] if valid else [f"FModel {label} skeleton identity is malformed"]
+
+
+def _is_hex_bytes(value: object, byte_count: int) -> bool:
+    if not isinstance(value, str) or len(value) != byte_count * 2:
+        return False
+    try:
+        bytes.fromhex(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _parameter_value_metadata(parameter) -> object:

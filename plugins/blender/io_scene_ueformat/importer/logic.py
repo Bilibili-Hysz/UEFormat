@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +13,7 @@ from mathutils import Matrix, Quaternion, Vector
 from math import *
 
 from .reorient_utils import reorient_bones
+from .fmodel import plan_fmodel_animation_binding, skeleton_identity_metadata
 
 from ..importer.classes import (
     MAGIC,
@@ -215,6 +217,12 @@ class UEFormatImport:
             armature_data.display_type = "STICK"
 
             template_armature_object = bpy.data.objects.new(name + "_Template_Skeleton", armature_data)
+            if data.skeleton_identity is not None:
+                template_armature_object["fmodel_skeleton_identity"] = json.dumps(
+                    skeleton_identity_metadata(data.skeleton_identity),
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
             template_armature_object.show_in_front = True
             bpy.context.collection.objects.link(template_armature_object)
             bpy.context.view_layer.objects.active = template_armature_object
@@ -371,6 +379,12 @@ class UEFormatImport:
                     lod.name + "_Skeleton",
                     armature_data,
                 )
+                if data.skeleton_identity is not None:
+                    armature_object["fmodel_skeleton_identity"] = json.dumps(
+                        skeleton_identity_metadata(data.skeleton_identity),
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
                 armature_object.show_in_front = True
                 return_object = armature_object
 
@@ -439,11 +453,61 @@ class UEFormatImport:
 
         data = UEAnim.from_archive(ar)
 
-        action = bpy.data.actions.new(name=name)
-
         armature = self.options.override_skeleton or get_active_armature()
         assert isinstance(armature, bpy.types.Object)  # noqa: S101
-        
+
+        target_identity = (
+            skeleton_identity_metadata(data.target_skeleton_identity)
+            if data.target_skeleton_identity is not None
+            else None
+        )
+        armature_identity = None
+        armature_identity_error = None
+        if "fmodel_skeleton_identity" in armature:
+            try:
+                armature_identity = json.loads(armature["fmodel_skeleton_identity"])
+                if not isinstance(armature_identity, dict):
+                    armature_identity = None
+                    armature_identity_error = "FModel armature skeleton identity is malformed"
+            except (TypeError, ValueError):
+                armature_identity_error = "FModel armature skeleton identity is malformed"
+
+        strict_skeleton = self.options.strict_fmodel_skeleton
+        if armature_identity_error and strict_skeleton:
+            raise ValueError(armature_identity_error)
+        binding_plan = plan_fmodel_animation_binding(
+            target_identity,
+            armature_identity,
+            (track.name for track in data.tracks),
+            (bone.name for bone in armature.pose.bones),
+            strict=strict_skeleton,
+        )
+        binding_issues = ([armature_identity_error] if armature_identity_error else []) + list(binding_plan.issues)
+        if binding_issues:
+            Log.warn(
+                "FModel animation compatibility is permissive: "
+                f"bound={binding_plan.bound_track_count}, skipped={binding_plan.skipped_track_count}, "
+                f"total={binding_plan.total_track_count}; {'; '.join(binding_issues)}"
+            )
+
+        action = bpy.data.actions.new(name=name)
+        if data.target_skeleton_identity is not None:
+            action["fmodel_target_skeleton_identity"] = json.dumps(
+                skeleton_identity_metadata(data.target_skeleton_identity),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        action["fmodel_animation_binding"] = json.dumps(
+            {
+                "bound_track_count": binding_plan.bound_track_count,
+                "skipped_track_count": binding_plan.skipped_track_count,
+                "total_track_count": binding_plan.total_track_count,
+                "strict": strict_skeleton,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
         if armature_anim_data := armature.animation_data:
             armature_anim_data.action = None
         
@@ -458,8 +522,8 @@ class UEFormatImport:
 
         # bone anim data
         pose_bones = armature.pose.bones
-        for track in data.tracks:
-            bone = get_case_insensitive(pose_bones, track.name)
+        for track, bone_name in zip(data.tracks, binding_plan.bound_bone_names):
+            bone = pose_bones.get(bone_name) if bone_name is not None else None
 
             if bone is None:
                 continue
@@ -731,3 +795,4 @@ class UEFormatImport:
         bpy.context.view_layer.objects.active = selected_mesh
         
     
+
