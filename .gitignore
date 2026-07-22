@@ -8,3 +8,6 @@ cmake-build-*/
 
 # Testing
 test/
+
+# Local isolated worktrees
+.worktrees/
