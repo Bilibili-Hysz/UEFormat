@@ -26,7 +26,11 @@ def _resource_cache_key(
     interpretation: str,
 ) -> tuple[str, str, str]:
     """Identify decoded images by Unreal identity, verified bytes, and use."""
-    contents = resource.read_bytes() if isinstance(resource, Path) else resource
+    if isinstance(resource, Path):
+        with open(_blender_file_path(resource), "rb") as file:
+            contents = file.read()
+    else:
+        contents = resource
     return (
         _canonical_unreal_identity(texture.unreal_object_path),
         sha256(contents).hexdigest(),

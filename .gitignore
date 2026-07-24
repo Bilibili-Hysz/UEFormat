@@ -2,7 +2,9 @@
 .idea
 
 # Runtime
-__pycache_
+__pycache__/
+*.pyc
+\.pytest_cache/
 core/build/
 cmake-build-*/
 

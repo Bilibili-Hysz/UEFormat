@@ -41,6 +41,9 @@ class UEModel:
     lods: list[UEModelLOD] = field(default_factory=list)
     collisions: list[ConvexCollision] = field(default_factory=list)
     skeleton: UEModelSkeleton | None = None
+    material_links: FModelMaterialLinks = field(default_factory=lambda: FModelMaterialLinks())
+    textures: list[TextureResource] = field(default_factory=list)
+    skeleton_identity: FModelSkeletonIdentity | None = None
     # physics = None  # noqa: ERA001
 
     @classmethod
@@ -49,25 +52,91 @@ class UEModel:
         ar: FArchiveReader
     ) -> UEModel:
         data = cls()
+        recognized_chunks: set[str] = set()
 
         while not ar.eof():
             section_name = ar.read_fstring()
             array_size = ar.read_int()
             byte_size = ar.read_int()
+            if array_size < 0:
+                raise ValueError(f"Invalid top-level array_size: {array_size}")
+            extension_name = {
+                "FMODEL_MATERIALS": "FModel materials",
+                "FMODEL_TEXTURES": "FModel textures",
+                "FMODEL_PBR_INTERFACES": "FModel PBR interfaces",
+                "FMODEL_SKELETON_IDENTITY": "FModel skeleton identity",
+            }.get(section_name, f"Top-level chunk {section_name}")
+            if byte_size < 0:
+                raise ValueError(f"{extension_name} chunk declared negative byte_size")
+            if byte_size > ar.remaining():
+                raise ValueError(f"{extension_name} chunk declared byte_size exceeds available data")
+
+            if section_name in {
+                "FMODEL_MATERIALS",
+                "FMODEL_TEXTURES",
+                "FMODEL_PBR_INTERFACES",
+                "FMODEL_SKELETON_IDENTITY",
+            }:
+                if section_name in recognized_chunks:
+                    raise ValueError(f"Invalid duplicate top-level chunk: {section_name}")
+                recognized_chunks.add(section_name)
+
+            chunk = ar.chunk(byte_size)
 
             match section_name:
                 case "LODS":
-                    data.lods = ar.read_array(array_size, lambda ar: UEModelLOD.from_archive(ar))
+                    if array_size > chunk.remaining() // 8:
+                        raise ValueError("Top-level LODS array_size cannot fit minimum records")
+                    data.lods = chunk.read_array(array_size, UEModelLOD.from_archive)
                 case "SKELETON":
-                    data.skeleton = UEModelSkeleton.from_archive(ar.chunk(byte_size))
+                    data.skeleton = UEModelSkeleton.from_archive(chunk)
                 case "COLLISION":
-                    data.collisions = ar.read_array(
+                    if array_size > chunk.remaining() // 12:
+                        raise ValueError("Top-level COLLISION array_size cannot fit minimum records")
+                    data.collisions = chunk.read_array(
                         array_size,
                         lambda ar: ConvexCollision.from_archive(ar),
                     )
+                case "FMODEL_MATERIALS":
+                    data.material_links = FModelMaterialLinks.from_archive(chunk, array_size)
+                case "FMODEL_TEXTURES":
+                    data.textures = TextureResource.read_all(chunk, array_size)
+                case "FMODEL_PBR_INTERFACES":
+                    data.material_links.pbr_interfaces = FModelPBRInterface.read_all(chunk, array_size)
+                    data.material_links.pbr_interfaces_present = True
+                case "FMODEL_SKELETON_IDENTITY":
+                    _validate_fmodel_identity_chunk_count(array_size, section_name)
+                    data.skeleton_identity = FModelSkeletonIdentity.from_archive(chunk)
                 case _:
                     Log.warn(f"Unknown Model Data: {section_name}")
-                    ar.skip(byte_size)
+                    chunk.read_to_end()
+            if not chunk.eof():
+                raise ValueError(f"Trailing bytes in {extension_name} chunk")
+        slots_by_ordinal: dict[int, FModelMaterialSlot] = {}
+        for slot in data.material_links.slots:
+            if slot.slot_index < 0:
+                raise ValueError(f"Invalid FModel material slot_index: {slot.slot_index}")
+            if slot.slot_index in slots_by_ordinal:
+                raise ValueError(f"Invalid FModel material duplicate slot_index: {slot.slot_index}")
+            slots_by_ordinal[slot.slot_index] = slot
+        singleton_roles: set[tuple[int, int]] = set()
+        for interface in data.material_links.pbr_interfaces:
+            slot = slots_by_ordinal.get(interface.slot_index)
+            if slot is None:
+                msg = f"Invalid FModel PBR interface slot_index: {interface.slot_index}"
+                raise ValueError(msg)
+            parameters = slot.parameters
+            if interface.parameter_index >= len(parameters):
+                msg = f"Invalid FModel PBR interface parameter_index: {interface.parameter_index}"
+                raise ValueError(msg)
+            role_key = (interface.slot_index, interface.role)
+            if role_key in singleton_roles:
+                msg = (
+                    "Invalid FModel PBR interface duplicate role "
+                    f"for slot_index {interface.slot_index}: {interface.role}"
+                )
+                raise ValueError(msg)
+            singleton_roles.add(role_key)
         return data
 
     @classmethod
@@ -117,7 +186,10 @@ class UEModel:
                     count = ar.read_int()
                     lod.uvs.append(np.array(ar.read_float_vector(count * 2)).reshape(count, 2))
             elif header_name == "MATERIALS":
-                lod.materials = ar.read_array(array_size, lambda ar: Material.from_archive(ar))
+                lod.materials = [
+                    Material.from_archive(ar, source_slot_index)
+                    for source_slot_index in range(array_size)
+                ]
             elif header_name == "WEIGHTS":
                 lod.weights = ar.read_array(array_size, lambda ar: Weight.from_archive(ar))
             elif header_name == "MORPHTARGETS":
@@ -148,6 +220,333 @@ class UEModel:
         data.lods.append(lod)
 
         return data
+
+
+def _read_non_negative_count(ar: FArchiveReader, name: str) -> int:
+    count = ar.read_int()
+    if count < 0:
+        msg = f"Invalid FModel {name}: {count}"
+        raise ValueError(msg)
+    return count
+
+
+# Stable per-list safety ceilings: 65,536 remains far above normal exports
+# while preventing attacker-controlled extension counts from driving allocations.
+MAX_FMODEL_SLOTS = 65_536
+MAX_FMODEL_PARAMETERS = 65_536
+MAX_FMODEL_TEXTURES = 65_536
+MAX_FMODEL_PBR_INTERFACES = 65_536
+MAX_FMODEL_IDENTITY_PATH_BYTES = 16 * 1024
+
+
+def _validate_max_count(count: int, maximum: int, name: str) -> None:
+    if count > maximum:
+        raise ValueError(f"Invalid FModel {name} exceeds maximum {maximum}: {count}")
+
+
+def _validate_fmodel_identity_chunk_count(array_size: int, section_name: str) -> None:
+    if array_size != 1:
+        raise ValueError(f"Invalid {section_name} chunk array_size: {array_size}")
+
+
+@dataclass(frozen=True, slots=True)
+class FModelSkeletonIdentity:
+    version: int
+    skeleton_path: str
+    skeleton_guid: bytes | None
+    bone_layout_hash: bytes
+
+    @classmethod
+    def from_archive(cls, ar: FArchiveReader) -> FModelSkeletonIdentity:
+        version = int.from_bytes(ar.read_byte(), byteorder="big")
+        if version != 1:
+            raise ValueError(f"Unsupported FModel skeleton identity version: {version}")
+        skeleton_path = ar.read_bounded_fstring(
+            MAX_FMODEL_IDENTITY_PATH_BYTES,
+            "FModel skeleton identity skeleton_path",
+        )
+        if not skeleton_path:
+            raise ValueError("Invalid FModel skeleton identity skeleton_path")
+        has_skeleton_guid = int.from_bytes(ar.read_byte(), byteorder="big")
+        if has_skeleton_guid not in (0, 1):
+            raise ValueError(f"Invalid FModel skeleton identity has_skeleton_guid: {has_skeleton_guid}")
+        skeleton_guid = ar.read(16) if has_skeleton_guid else None
+        bone_layout_hash = ar.read(32)
+        if not ar.eof():
+            raise ValueError("Trailing FModel skeleton identity data")
+        return cls(version, skeleton_path, skeleton_guid, bone_layout_hash)
+
+
+@dataclass(frozen=True, slots=True)
+class FModelTargetSkeletonIdentity(FModelSkeletonIdentity):
+    source_animation_path: str
+
+    @classmethod
+    def from_archive(cls, ar: FArchiveReader) -> FModelTargetSkeletonIdentity:
+        version = int.from_bytes(ar.read_byte(), byteorder="big")
+        if version != 1:
+            raise ValueError(f"Unsupported FModel skeleton identity version: {version}")
+        source_animation_path = ar.read_bounded_fstring(
+            MAX_FMODEL_IDENTITY_PATH_BYTES,
+            "FModel target skeleton source_animation_path",
+        )
+        if not source_animation_path:
+            raise ValueError("Invalid FModel target skeleton source_animation_path")
+        skeleton_path = ar.read_bounded_fstring(MAX_FMODEL_IDENTITY_PATH_BYTES, "FModel skeleton identity skeleton_path")
+        if not skeleton_path:
+            raise ValueError("Invalid FModel skeleton identity skeleton_path")
+        has_guid = int.from_bytes(ar.read_byte(), byteorder="big")
+        if has_guid not in (0, 1):
+            raise ValueError(f"Invalid FModel skeleton identity has_skeleton_guid: {has_guid}")
+        guid = ar.read(16) if has_guid else None
+        layout_hash = ar.read(32)
+        if not ar.eof():
+            raise ValueError("Trailing FModel skeleton identity data")
+        return cls(
+            version,
+            skeleton_path,
+            guid,
+            layout_hash,
+            source_animation_path,
+        )
+
+
+def _validate_top_level_count(count: int, array_size: int, name: str) -> None:
+    if count != array_size:
+        raise ValueError(
+            f"Invalid FModel {name} count {count} does not match top-level array_size {array_size}"
+        )
+
+
+@dataclass(slots=True)
+class FModelMaterialLinks:
+    slots: list[FModelMaterialSlot] = field(default_factory=list)
+    source_material_mapping_present: bool = False
+    pbr_interfaces: list[FModelPBRInterface] = field(default_factory=list)
+    pbr_interfaces_present: bool = False
+
+    @property
+    def source_slot_to_blender_index(self) -> dict[int, int]:
+        """Map serialized source slots to the dense MATERIALS record order."""
+        return {slot.slot_index: index for index, slot in enumerate(self.slots)}
+
+    @classmethod
+    def from_archive(cls, ar: FArchiveReader, array_size: int) -> FModelMaterialLinks:
+        extension_version = int.from_bytes(ar.read_byte(), byteorder="little")
+        if extension_version not in (1, 2):
+            msg = f"Unsupported FModel material extension version: {extension_version}"
+            raise ValueError(msg)
+        count = _read_non_negative_count(ar, "slot count")
+        _validate_top_level_count(count, array_size, "slot")
+        _validate_max_count(count, MAX_FMODEL_SLOTS, "slot count")
+        if count > ar.remaining() // (24 if extension_version == 2 else 20):
+            raise ValueError("Invalid FModel slot count cannot fit minimum records")
+        return cls(
+            slots=ar.read_array(count, lambda record: FModelMaterialSlot.from_archive(record, extension_version)),
+            source_material_mapping_present=extension_version == 2,
+        )
+
+
+@dataclass(slots=True)
+class FModelPBRInterface:
+    slot_index: int
+    parameter_index: int
+    role: int
+
+    @classmethod
+    def read_all(cls, ar: FArchiveReader, array_size: int) -> list[FModelPBRInterface]:
+        extension_version = int.from_bytes(ar.read_byte(), byteorder="little")
+        if extension_version != 2:
+            msg = f"Unsupported FModel PBR interface extension version: {extension_version}"
+            raise ValueError(msg)
+        count = _read_non_negative_count(ar, "PBR interface count")
+        _validate_top_level_count(count, array_size, "PBR interface")
+        _validate_max_count(count, MAX_FMODEL_PBR_INTERFACES, "PBR interface count")
+        if count > ar.remaining() // 9:
+            raise ValueError("Invalid FModel PBR interface count cannot fit minimum records")
+        return ar.read_array(count, cls.from_archive)
+
+    @classmethod
+    def from_archive(cls, ar: FArchiveReader) -> FModelPBRInterface:
+        slot_index = ar.read_int()
+        parameter_index = ar.read_int()
+        role = int.from_bytes(ar.read_byte(), byteorder="little")
+        if slot_index < 0:
+            raise ValueError(f"Invalid FModel PBR interface slot_index: {slot_index}")
+        if parameter_index < 0:
+            raise ValueError(f"Invalid FModel PBR interface parameter_index: {parameter_index}")
+        if role < 1 or role > 12:
+            raise ValueError(f"Invalid FModel PBR role: {role}")
+        return cls(slot_index, parameter_index, role)
+
+
+@dataclass(slots=True)
+class FModelMaterialSlot:
+    slot_index: int
+    slot_name: str
+    unreal_material_path: str
+    material_json_uri: str
+    source_material_index: int | None = None
+    parameters: list[FModelMaterialParameter] = field(default_factory=list)
+
+    @classmethod
+    def from_archive(cls, ar: FArchiveReader, extension_version: int = 1) -> FModelMaterialSlot:
+        slot_index = ar.read_int()
+        if slot_index < 0:
+            raise ValueError(f"Invalid FModel material slot_index: {slot_index}")
+        source_material_index = ar.read_int() if extension_version == 2 else None
+        if source_material_index is not None and source_material_index < -1:
+            raise ValueError(f"Invalid FModel material source_material_index: {source_material_index}")
+        if source_material_index == -1:
+            source_material_index = None
+        slot_name = ar.read_fstring()
+        unreal_material_path = ar.read_fstring()
+        material_json_uri = ar.read_fstring()
+        parameter_count = _read_non_negative_count(ar, "parameter count")
+        _validate_max_count(parameter_count, MAX_FMODEL_PARAMETERS, "parameter count")
+        if parameter_count > ar.remaining() // 13:
+            raise ValueError("Invalid FModel parameter count cannot fit minimum records")
+        return cls(
+            slot_index=slot_index,
+            source_material_index=source_material_index,
+            slot_name=slot_name,
+            unreal_material_path=unreal_material_path,
+            material_json_uri=material_json_uri,
+            parameters=ar.read_array(
+                parameter_count,
+                FModelMaterialParameter.from_archive,
+            ),
+        )
+
+
+@dataclass(slots=True)
+class FModelMaterialParameter:
+    name: str
+    kind: int
+    semantic: str
+    value: TextureResource | float | tuple[float, float, float, float]
+
+    @classmethod
+    def from_archive(cls, ar: FArchiveReader) -> FModelMaterialParameter:
+        name = ar.read_fstring()
+        kind = int.from_bytes(ar.read_byte(), byteorder="little")
+        semantic = ar.read_fstring()
+        if kind == 1:
+            value: TextureResource | float | tuple[float, float, float, float] = TextureResource.from_parameter_archive(ar)
+        elif kind == 2:
+            value = ar.read_float()
+        elif kind == 3:
+            value = tuple(ar.read_float_vector(4))
+        else:
+            msg = f"Invalid FModel material parameter kind: {kind}"
+            raise ValueError(msg)
+        return cls(name=name, kind=kind, semantic=semantic, value=value)
+
+    @property
+    def texture(self) -> TextureResource:
+        assert isinstance(self.value, TextureResource)  # noqa: S101
+        return self.value
+
+    @property
+    def location_mode(self) -> int:
+        return self.texture.location_mode
+
+    @property
+    def uri(self) -> str:
+        return self.texture.uri
+
+    @property
+    def texture_id(self) -> int:
+        return self.texture.id
+
+    @property
+    def unreal_object_path(self) -> str:
+        return self.texture.unreal_object_path
+
+    @property
+    def color_space(self) -> int:
+        return self.texture.color_space
+
+    @property
+    def packing(self) -> int:
+        return self.texture.packing
+
+    @property
+    def uv_set(self) -> int:
+        return self.texture.uv_set
+
+
+@dataclass(slots=True)
+class TextureResource:
+    id: int
+    unreal_object_path: str
+    mime: str = ""
+    data: bytes = b""
+    location_mode: int = 0
+    uri: str = ""
+    color_space: int = 0
+    packing: int = 0
+    uv_set: int = 0
+
+    @property
+    def image_bytes(self) -> bytes:
+        """Raw bytes from an FMODEL_TEXTURES embedded resource."""
+        return self.data
+
+    @classmethod
+    def from_parameter_archive(cls, ar: FArchiveReader) -> TextureResource:
+        location_mode = int.from_bytes(ar.read_byte(), byteorder="little")
+        uri = ar.read_fstring()
+        texture_id = ar.read_int()
+        unreal_object_path = ar.read_fstring()
+        return cls(
+            id=texture_id,
+            unreal_object_path=unreal_object_path,
+            location_mode=location_mode,
+            uri=uri,
+            color_space=int.from_bytes(ar.read_byte(), byteorder="little"),
+            packing=int.from_bytes(ar.read_byte(), byteorder="little"),
+            uv_set=ar.read_int(),
+        )
+
+    @classmethod
+    def read_all(cls, ar: FArchiveReader, array_size: int) -> list[TextureResource]:
+        version = int.from_bytes(ar.read_byte(), byteorder="little")
+        if version != 1:
+            msg = f"Unsupported FModel texture extension version: {version}"
+            raise ValueError(msg)
+        count = _read_non_negative_count(ar, "texture count")
+        _validate_top_level_count(count, array_size, "texture")
+        _validate_max_count(count, MAX_FMODEL_TEXTURES, "texture count")
+        if count > ar.remaining() // 16:
+            raise ValueError("Invalid FModel texture count cannot fit minimum records")
+        resources = ar.read_array(count, cls.from_archive)
+        ids: set[int] = set()
+        for resource in resources:
+            if resource.id in ids:
+                raise ValueError(f"Invalid FModel duplicate embedded texture id: {resource.id}")
+            ids.add(resource.id)
+        return resources
+
+    @classmethod
+    def from_archive(cls, ar: FArchiveReader) -> TextureResource:
+        texture_id = ar.read_int()
+        unreal_object_path = ar.read_fstring()
+        mime = ar.read_fstring()
+        byte_length = _read_non_negative_count(ar, "texture byte length")
+        if byte_length > ar.remaining():
+            msg = f"Truncated FModel texture data: expected {byte_length} bytes, got {ar.remaining()}"
+            raise ValueError(msg)
+        data = ar.read(byte_length)
+        if len(data) != byte_length:
+            msg = f"Truncated FModel texture data: expected {byte_length} bytes, got {len(data)}"
+            raise ValueError(msg)
+        return cls(
+            id=texture_id,
+            unreal_object_path=unreal_object_path,
+            mime=mime,
+            data=data,
+        )
 
 
 @dataclass(slots=True)
@@ -216,10 +615,10 @@ class UEModelLOD:
                 
                     data.uvs.append(uvs)
             elif header_name == "MATERIALS":
-                data.materials = ar.read_array(
-                    array_size,
-                    lambda ar: Material.from_archive(ar),
-                )
+                data.materials = [
+                    Material.from_archive(ar, source_slot_index)
+                    for source_slot_index in range(array_size)
+                ]
             elif header_name == "WEIGHTS":
                 data.weights = ar.read_array(
                     array_size,
@@ -338,14 +737,16 @@ class Material:
     material_path: str
     first_index: int
     num_faces: int
+    source_slot_index: int | None = None
 
     @classmethod
-    def from_archive(cls, ar: FArchiveReader) -> Material:
+    def from_archive(cls, ar: FArchiveReader, source_slot_index: int) -> Material:
         return cls(
             material_name=ar.read_fstring(),
             material_path=ar.read_fstring() if ar.file_version >= EUEFormatVersion.SerializeMaterialPath else "",
             first_index=ar.read_int(),
             num_faces=ar.read_int(),
+            source_slot_index=source_slot_index,
         )
 
 
@@ -461,10 +862,12 @@ class UEAnim:
     metadata: UEAnimMetadata = None
     tracks: list[Track] = field(default_factory=list)
     curves: list[Curve] = field(default_factory=list)
+    target_skeleton_identity: FModelTargetSkeletonIdentity | None = None
 
     @classmethod
     def from_archive(cls, ar: FArchiveReader) -> UEAnim:
         data = cls()
+        recognized_chunks: set[str] = set()
         
         if ar.file_version < EUEFormatVersion.SerializeAssetMetadata:
             data.metadata = UEAnimMetadata(num_frames=ar.read_int(), frames_per_second=ar.read_float())
@@ -474,22 +877,43 @@ class UEAnim:
             array_size = ar.read_int()
             byte_size = ar.read_int()
 
+            if array_size < 0:
+                raise ValueError(f"Invalid top-level array_size: {array_size}")
+            extension_name = {
+                "FMODEL_TARGET_SKELETON": "FModel target skeleton",
+            }.get(section_name, f"Top-level chunk {section_name}")
+            if byte_size < 0:
+                raise ValueError(f"{extension_name} chunk declared negative byte_size")
+            if byte_size > ar.remaining():
+                raise ValueError(f"{extension_name} chunk declared byte_size exceeds available data")
+            if section_name == "FMODEL_TARGET_SKELETON":
+                if section_name in recognized_chunks:
+                    raise ValueError(f"Invalid duplicate {section_name} chunk")
+                recognized_chunks.add(section_name)
+
+            chunk = ar.chunk(byte_size)
+
             match section_name:
                 case "METADATA":
-                    data.metadata = UEAnimMetadata.from_archive(ar)
+                    data.metadata = UEAnimMetadata.from_archive(chunk)
                 case "TRACKS":
-                    data.tracks = ar.read_array(
+                    data.tracks = chunk.read_array(
                         array_size,
                         lambda ar: Track.from_archive(ar),
                     )
                 case "CURVES":
-                    data.curves = ar.read_array(
+                    data.curves = chunk.read_array(
                         array_size,
                         lambda ar: Curve.from_archive(ar),
                     )
+                case "FMODEL_TARGET_SKELETON":
+                    _validate_fmodel_identity_chunk_count(array_size, section_name)
+                    data.target_skeleton_identity = FModelTargetSkeletonIdentity.from_archive(chunk)
                 case _:
                     Log.warn(f"Unknown Animation Data: {section_name}")
-                    ar.skip(byte_size)
+                    chunk.read_to_end()
+            if not chunk.eof():
+                raise ValueError(f"Trailing bytes in {extension_name} chunk")
 
         return data
 

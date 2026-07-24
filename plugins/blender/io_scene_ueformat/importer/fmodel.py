@@ -62,7 +62,7 @@ class FModelResourceResolver:
     def resolve_texture(self, texture: TextureResource) -> Path | bytes:
         """Return a safe resource location or embedded bytes for ``texture``."""
         if texture.location_mode == RELATIVE_LOCATION_MODE:
-            self._validate_relative_uri(texture.uri, "relative")
+            self._validate_relative_uri(texture.uri, "relative", allow_leading_parents=True)
             candidate = self.model_path.parent.joinpath(*PurePosixPath(texture.uri).parts)
             if self.ue_export_root is None:
                 return candidate.resolve(strict=False)
@@ -100,21 +100,28 @@ class FModelResourceResolver:
         return candidate
 
     @staticmethod
-    def _validate_relative_uri(uri: str, mode: str) -> None:
+    def _validate_relative_uri(uri: str, mode: str, *, allow_leading_parents: bool = False) -> None:
         if "\0" in uri or "\\" in uri or not uri or ":" in uri:
             raise ValueError(f"Invalid FModel {mode} URI")
         path = PurePosixPath(uri)
-        if path.is_absolute() or any(part in {"", ".", ".."} for part in uri.split("/")):
+        parts = uri.split("/")
+        if path.is_absolute() or any(part in {"", "."} for part in parts):
+            raise ValueError(f"Invalid FModel {mode} URI")
+        if allow_leading_parents:
+            while parts and parts[0] == "..":
+                parts = parts[1:]
+        if any(part == ".." for part in parts):
             raise ValueError(f"Invalid FModel {mode} URI")
 
 
 def material_links_metadata(material_links: FModelMaterialLinks) -> dict[str, object]:
     """Return versioned, JSON-serializable raw FModel material-link records."""
     metadata = {
-        "version": 2 if material_links.pbr_interfaces else 1,
+        "version": 2 if material_links.source_material_mapping_present or material_links.pbr_interfaces else 1,
         "slots": [
             {
                 "slot_index": slot.slot_index,
+                "source_material_index": slot.source_material_index,
                 "slot_name": slot.slot_name,
                 "unreal_material_path": slot.unreal_material_path,
                 "material_json_uri": slot.material_json_uri,

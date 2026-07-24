@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import gzip
+import os
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -14,7 +16,14 @@ from math import *
 
 from .reorient_utils import reorient_bones
 from .animation_time import animation_time_provenance, make_source_tick_converter
-from .fmodel import plan_fmodel_animation_binding, skeleton_identity_metadata
+from .fmodel import (
+    FModelResourceResolver,
+    material_links_metadata,
+    plan_fmodel_animation_binding,
+    skeleton_identity_metadata,
+)
+from .material_builder import FModelMaterialImportOptions, build_fmodel_materials
+from .material_images import FModelImageRepository
 
 from ..importer.classes import (
     MAGIC,
@@ -41,17 +50,140 @@ from ..logging import Log
 from ..options import UEAnimOptions, UEFormatOptions, UEModelOptions, UEPoseOptions
 
 
+@dataclass(frozen=True, slots=True)
+class UEMODELPreflight:
+    source_lods: frozenset[int]
+    material_slots: dict[int, str]
+    source_material_mapping_present: bool = False
+
+
+class UEMODELSourceMaterialAmbiguityError(ValueError):
+    code = "mato_source_material_mapping_ambiguous"
+
+
+def _read_compressed_archive(ar: FArchiveReader) -> FArchiveReader:
+    compression_type = ar.read_fstring()
+    uncompressed_size = ar.read_int()
+    compressed_size = ar.read_int()
+    compressed_payload = ar.read_to_end()
+    if len(compressed_payload) != compressed_size:
+        raise ValueError("Compressed payload size does not match header")
+
+    if compression_type == "GZIP":
+        decompressed_payload = gzip.decompress(compressed_payload)
+    elif compression_type == "ZSTD":
+        from .. import zstd_decompressor
+        decompressed_payload = zstd_decompressor.decompress(compressed_payload, uncompressed_size)
+    else:
+        raise ValueError(f"Unknown Compression Type: {compression_type}")
+
+    if len(decompressed_payload) != uncompressed_size:
+        raise ValueError("Decompressed payload size does not match header")
+    return FArchiveReader(decompressed_payload)
+
+
+def read_uemodel_source_lods(path: str | Path) -> UEMODELPreflight:
+    """Read UEMODEL LOD and effective material identities without Blender data."""
+    path = path if isinstance(path, Path) else Path(path)
+    filename = os.fspath(path)
+    if os.name == "nt" and os.path.isabs(filename) and not filename.startswith("\\\\?\\"):
+        filename = "\\\\?\\UNC\\" + filename[2:] if filename.startswith("\\\\") else "\\\\?\\" + filename
+    with open(filename, "rb") as file, FArchiveReader(file.read()) as ar:
+        magic = ar.read_string(len(MAGIC))
+        if magic != MAGIC:
+            raise ValueError("Invalid magic")
+        identifier = ar.read_fstring()
+        file_version = EUEFormatVersion(int.from_bytes(ar.read_byte(), byteorder="big"))
+        if identifier != MODEL_IDENTIFIER:
+            raise ValueError(f"Expected UEMODEL, got {identifier}")
+        ar.read_fstring()
+        read_archive = ar
+        if ar.read_bool():
+            read_archive = _read_compressed_archive(ar)
+        read_archive.file_version = file_version
+        read_archive.metadata["scale"] = 1.0
+        data = UEModel.from_archive(read_archive) if file_version >= EUEFormatVersion.LevelOfDetailFormatRestructure else UEModel.from_archive_legacy(read_archive)
+    lods = set()
+    for lod in data.lods:
+        if lod.name.startswith("LOD") and lod.name[3:].isdigit():
+            lods.add(int(lod.name[3:]))
+        else:
+            raise ValueError(f"Invalid UEMODEL source LOD identity {lod.name!r}")
+    material_slots: dict[int, str] = {}
+    material_identities: dict[int, str | None] = {}
+    for slot in data.material_links.slots:
+        source_index = slot.source_material_index
+        if source_index is None:
+            continue
+        identity = _valid_unreal_material_identity(slot.unreal_material_path)
+        if identity is None:
+            raise UEMODELSourceMaterialAmbiguityError(
+                f"mato_source_material_mapping_ambiguous: source material index {source_index} "
+                f"has an invalid identity {slot.unreal_material_path!r}"
+            )
+        if source_index in material_identities and material_identities[source_index] != identity:
+            raise UEMODELSourceMaterialAmbiguityError(
+                f"mato_source_material_mapping_ambiguous: source material index {source_index} "
+                f"has conflicting identities {material_identities[source_index]!r} and {identity!r}"
+            )
+        material_identities[source_index] = identity
+        material_slots[source_index] = identity
+    return UEMODELPreflight(
+        frozenset(lods),
+        material_slots,
+        data.material_links.source_material_mapping_present,
+    )
+
+
+def _valid_unreal_material_identity(path: str | None) -> str | None:
+    if not path:
+        return None
+    if not path.startswith("/"):
+        path = "/" + path
+    if len(path) < 4 or path.startswith("//"):
+        return None
+    slash = path.rfind("/")
+    if slash <= 1:
+        return None
+    package_segments = path[1:slash].split("/")
+    if any(not segment or segment in (".", "..") or "." in segment for segment in package_segments):
+        return None
+    terminal = path[slash + 1:]
+    dot = terminal.find(".")
+    if dot >= 0:
+        if dot == 0 or dot != terminal.rfind(".") or dot == len(terminal) - 1:
+            return None
+        if terminal[:dot] != terminal[dot + 1:]:
+            return None
+        path = path[:slash + 1 + dot]
+    if not path[path.rfind("/") + 1:] or "." in path[path.rfind("/") + 1:]:
+        return None
+    return path
+
+
 class UEFormatImport:
-    def __init__(self, options: UEFormatOptions) -> None:
+    def __init__(
+        self,
+        options: UEFormatOptions,
+        material_options: FModelMaterialImportOptions | None = None,
+    ) -> None:
         self.options = options
+        self.material_options = material_options
 
     def import_file(self, path: str | Path) -> Object | Action:
         path = path if isinstance(path, Path) else Path(path)
 
         Log.time_start(f"Import {path}")
 
-        with path.open("rb") as file:
-            obj = self.import_data(file.read())
+        self._fmodel_model_path = path
+        try:
+            filename = os.fspath(path)
+            if os.name == "nt" and os.path.isabs(filename) and not filename.startswith("\\\\?\\"):
+                filename = "\\\\?\\UNC\\" + filename[2:] if filename.startswith("\\\\") else "\\\\?\\" + filename
+            with open(filename, "rb") as file:
+                obj = self.import_data(file.read())
+        finally:
+            del self._fmodel_model_path
 
         Log.time_end(f"Import {path}")
 
@@ -78,31 +210,13 @@ class UEFormatImport:
         read_archive = ar
         is_compressed = ar.read_bool()
         if is_compressed:
-
-            compression_type = ar.read_fstring()
-            uncompressed_size = ar.read_int()
-            _compressed_size = ar.read_int()
-
-            if compression_type == "GZIP":
-                read_archive = FArchiveReader(gzip.decompress(ar.read_to_end()))
-            elif compression_type == "ZSTD":
-                from .. import zstd_decompressor
-                read_archive = FArchiveReader(
-                    zstd_decompressor.decompress(
-                        ar.read_to_end(),
-                        uncompressed_size,
-                    ),
-                )
-            else:
-                msg = f"Unknown Compression Type: {compression_type}"
-                Log.error(msg)
-                raise ValueError(msg)
+            read_archive = _read_compressed_archive(ar)
 
         read_archive.file_version = file_version
         read_archive.metadata["scale"] = self.options.scale_factor
 
         if identifier == MODEL_IDENTIFIER:
-            return self.import_uemodel_data(read_archive, object_name)
+            return self.import_uemodel_data(read_archive, object_name, self.material_options)
         if identifier == ANIM_IDENTIFIER:
             return self.import_ueanim_data(read_archive, object_name)
         if identifier == POSE_IDENTIFIER:
@@ -113,8 +227,24 @@ class UEFormatImport:
         raise ValueError
 
     # TODO: clean up code quality, esp in the skeleton department
-    def import_uemodel_data(self, ar: FArchiveReader, name: str) -> tuple[bpy.types.Object, UEModel]:
+    def import_uemodel_data(
+        self,
+        ar: FArchiveReader,
+        name: str,
+        material_options: FModelMaterialImportOptions | None = None,
+    ) -> tuple[bpy.types.Object, UEModel]:
         assert isinstance(self.options, UEModelOptions)  # noqa: S101
+
+        if material_options is None:
+            material_options = FModelMaterialImportOptions(
+                import_materials=self.options.import_fmodel_materials,
+                build_nodes=self.options.build_fmodel_material_nodes,
+                load_embedded=self.options.load_fmodel_embedded_textures,
+                load_external=self.options.load_fmodel_external_textures,
+                keep_unmapped=self.options.keep_fmodel_unmapped_parameters,
+                ue_export_root=self.options.fmodel_ue_export_root or None,
+                bundle_root=self.options.fmodel_bundle_root or None,
+            )
 
         data: UEModel
         if ar.file_version >= EUEFormatVersion.LevelOfDetailFormatRestructure:
@@ -124,16 +254,21 @@ class UEFormatImport:
 
         # meshes
         return_object = None
-        target_lod = min(self.options.target_lod, len(data.lods) - 1)
+        target_lod_name = f"LOD{self.options.target_lod}"
+        selected_lods = [lod for lod in data.lods if lod.name == target_lod_name]
+        if not selected_lods:
+            available = ", ".join(lod.name for lod in data.lods) or "none"
+            raise ValueError(
+                f"Requested source LOD {self.options.target_lod} is unavailable; available LODs: {available}"
+            )
         created_lods: list[Object] = []
-        for index, lod in enumerate(data.lods):
-            if index != target_lod:
-                continue
+        for lod in selected_lods:
                 
             lod_name = f"{name}_{lod.name}"
             mesh_data = bpy.data.meshes.new(lod_name)
 
             mesh_data.from_pydata(lod.vertices, [], lod.indices)  # type: ignore[reportArgumentType]
+            mesh_data["fmodel_material_links"] = json.dumps(material_links_metadata(data.material_links))
 
             mesh_object = bpy.data.objects.new(lod_name, mesh_data)
             return_object = mesh_object
@@ -203,12 +338,45 @@ class UEFormatImport:
                     mat = bpy.data.materials.get(material.material_name)
                     if mat is None:
                         mat = bpy.data.materials.new(name=material.material_name)
+                        # This temporary slot material belongs to this importer and may be
+                        # rebuilt in place by the FModel material-link pipeline below.
+                        mat["fmodel_importer_owned"] = True
                     mesh_data.materials.append(mat)
 
                     start_face_index = material.first_index // 3
                     end_face_index = start_face_index + material.num_faces
                     for face_index in range(start_face_index, end_face_index):
                         mesh_data.polygons[face_index].material_index = i
+
+                if material_options.import_materials:
+                    model_path = getattr(self, "_fmodel_model_path", Path(name))
+                    ue_export_root = material_options.ue_export_root or None
+                    bundle_root = material_options.bundle_root or None
+                    resolver = FModelResourceResolver(
+                        model_path=model_path,
+                        fmodel_textures=data.textures,
+                        ue_export_root=ue_export_root,
+                        bundle_root=bundle_root,
+                    )
+                    images = FModelImageRepository(
+                        resolver,
+                        model_path,
+                        ue_export_root,
+                        bundle_root,
+                    )
+                    build_fmodel_materials(
+                        mesh_data,
+                        lod.materials,
+                        data.material_links,
+                        images,
+                        Log.warn,
+                        material_options,
+                        source_slot_to_blender_index={
+                            material.source_slot_index: blender_index
+                            for blender_index, material in enumerate(lod.materials)
+                            if material.source_slot_index is not None
+                        },
+                    )
 
             created_lods.append(mesh_object)
 
@@ -525,12 +693,12 @@ class UEFormatImport:
             separators=(",", ":"),
             sort_keys=True,
         )
-
         action["fmodel_animation_time"] = json.dumps(
             time_provenance,
             separators=(",", ":"),
             sort_keys=True,
         )
+
         if armature_anim_data := armature.animation_data:
             armature_anim_data.action = None
         
@@ -826,4 +994,3 @@ class UEFormatImport:
         bpy.context.view_layer.objects.active = selected_mesh
         
     
-

@@ -62,7 +62,8 @@ def _scene(*, strs: bytes | None = None, chunks: dict[bytes, bytes] | None = Non
 
 def _mutate_chunk(data: bytes, name: bytes, relative_offset: int, value: bytes) -> bytes:
     result = bytearray(data)
-    for directory_offset in range(44, 44 + 9 * 40, 40):
+    directory_count = int.from_bytes(result[28:32], "little")
+    for directory_offset in range(44, 44 + directory_count * 40, 40):
         if result[directory_offset:directory_offset + 4] != name:
             continue
         payload_offset = int.from_bytes(result[directory_offset + 8:directory_offset + 16], "little")
@@ -122,6 +123,27 @@ def test_accepts_rect_attenuation_and_raw_inverse_square_falloff_exponent():
 def test_rejects_lite_feature_mismatch_and_corruption(optional_features: int, lights: bytes | None, match: str):
     with pytest.raises(_module().UESceneError, match=match):
         _module().UEScene.from_bytes(_scene(optional_features=optional_features, lights=lights))
+
+
+@pytest.mark.parametrize("chunk, offset, value", [
+    (b"XFRM", 4 + 8, struct.pack("<Q", 0x8000000000000000)),
+    (b"ASST", 8 + 84 + 48, struct.pack("<Q", 0x8000000000000000)),
+    (b"INST", 8 + 32, struct.pack("<I", 0x80000000)),
+])
+def test_rejects_negative_zero_outside_lite(chunk: bytes, offset: int, value: bytes):
+    chunks = {b"META": _meta(1), b"COMP": _table(1, _component(30, kind=2, instance_set=40)), b"INST": _inst()} if chunk == b"INST" else None
+    with pytest.raises(_module().UESceneError, match="negative zero"):
+        _module().UEScene.from_bytes(_mutate_chunk(_scene(chunks=chunks), chunk, offset, value))
+
+
+@pytest.mark.parametrize("optional_features, chunks", [
+    (4, None),
+    (0, {b"CAMR": struct.pack("<I", 0)}),
+    (4, {b"CAMR": struct.pack("<I", 0)}),
+])
+def test_rejects_retired_camera_declarations(optional_features: int, chunks: dict[bytes, bytes] | None):
+    with pytest.raises(_module().UESceneError, match="CAMR|camera"):
+        _module().UEScene.from_bytes(_scene(optional_features=optional_features, chunks=chunks))
 
 @pytest.mark.parametrize("mutate", ["magic", "header_crc", "range", "chunk_crc"])
 def test_rejects_corrupt_framing_and_crc(mutate: str):
@@ -276,11 +298,37 @@ def test_plan_verifies_material_and_texture_sidecars_under_bundle_root(tmp_path:
 
     assert scene.build_import_plan(bundle_root / "level.uescene", bundle_root).components[0].model_path == model
     material.write_bytes(b"tampered")
-    plan = scene.build_import_plan(bundle_root / "level.uescene", bundle_root)
-    assert plan.components[0].model_path == model
-    assert plan.warnings == ("optional material sidecar does not match BNDX",)
+    with pytest.raises(_module().UESceneError, match="sidecar does not match BNDX"):
+        scene.build_import_plan(bundle_root / "level.uescene", bundle_root)
     material.write_bytes(b"material")
     texture.write_bytes(b"tampered")
+    with pytest.raises(_module().UESceneError, match="sidecar does not match BNDX"):
+        scene.build_import_plan(bundle_root / "level.uescene", bundle_root)
+
+
+def test_plan_rejects_tampered_unreferenced_available_mesh_sidecar(tmp_path: Path):
+    bundle_root = tmp_path / "bundle"
+    model = bundle_root / "Models" / "M-Unreferenced.uemodel"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"model")
+    strings = _strings([
+        b"uescene", b"Models/M-Hero.uemodel", b"Actor", b"Component", b"/Game/Cube", b"Cube",
+        b"model/uemodel", b"ActorClass", b"/Game/Actor", b"ComponentClass", b"/Game/Component",
+        b"/Game/Unused", b"Unused", b"Models/M-Unreferenced.uemodel",
+    ])
+    model_hash = sha256(b"model").digest()
+    unused_hash = sha256(b"unused").digest()
+    assets = struct.pack("<II", 2, 2)
+    assets += struct.pack("<QBBBBIIII32sQIIII", 10, 1, 2, 1, 0, 5, 6, 2, 7, model_hash, 5, 0, 0, 0, 1)
+    assets += struct.pack("<QBBBBIIII32sQIIII", 11, 1, 2, 1, 0, 12, 13, 14, 7, unused_hash, 6, 0, 0, 1, 1)
+    assets += struct.pack("<II32sQ6dfI", 0, 2, model_hash, 5, 0, 0, 0, 1, 1, 1, float("nan"), 0)
+    assets += struct.pack("<II32sQ6dfI", 0, 2, unused_hash, 6, 0, 0, 0, 1, 1, 1, float("nan"), 0)
+    bundle_entries = _table(2,
+        struct.pack("<BBBBIQI32sQIII", 1, 2, 1, 0, 2, 10, 0xffffffff, model_hash, 5, 7, 0, 0)
+        + struct.pack("<BBBBIQI32sQIII", 1, 2, 1, 0, 14, 11, 0xffffffff, unused_hash, 6, 7, 0, 0),
+    )
+    scene = _module().UEScene.from_bytes(_scene(strs=strings, chunks={b"ASST": assets, b"BNDX": bundle_entries}))
+
     with pytest.raises(_module().UESceneError, match="sidecar does not match BNDX"):
         scene.build_import_plan(bundle_root / "level.uescene", bundle_root)
 
@@ -336,13 +384,13 @@ def test_rejects_bndx_orphan_or_wrong_availability(owner: int, availability: int
     with pytest.raises(_module().UESceneError, match="BNDX"):
         _module().UEScene.from_bytes(_scene(chunks={b"BNDX": _table(1, entry)}))
 
-def test_accepts_available_material_without_materialjson_bndx():
+def test_allows_available_material_without_materialjson_bndx():
     material = struct.pack("<QBBBBIIII32sQIIII", 11, 2, 2, 1, 0, 12, 13, 14, 15, sha256(b"material").digest(), 8, 0, 0, 0, 0)
     scene = _module().UEScene.from_bytes(_scene(
-        strs=_strings([b"uescene", b"models/cube.uemodel", b"Actor", b"Component", b"/Game/Cube", b"Cube", b"model/uemodel", b"ActorClass", b"/Game/Actor", b"ComponentClass", b"/Game/Component", b"materials/cube.material.json", b"/Game/Material", b"CubeMaterial", b"application/json"]),
-        chunks={b"ASST": struct.pack("<II", 2, 1) + struct.pack("<QBBBBIIII32sQIIII", 10, 1, 2, 1, 0, 5, 6, 2, 7, sha256(b"model").digest(), 5, 0, 0, 0, 1) + material + struct.pack("<II32sQ6dfI", 0, 2, sha256(b"model").digest(), 5, 0, 0, 0, 1, 1, 1, float("nan"), 0)},
-    ))
-    assert [asset.id for asset in scene.assets] == [10, 11]
+            strs=_strings([b"uescene", b"models/cube.uemodel", b"Actor", b"Component", b"/Game/Cube", b"Cube", b"model/uemodel", b"ActorClass", b"/Game/Actor", b"ComponentClass", b"/Game/Component", b"materials/cube.material.json", b"/Game/Material", b"CubeMaterial", b"application/json"]),
+            chunks={b"ASST": struct.pack("<II", 2, 1) + struct.pack("<QBBBBIIII32sQIIII", 10, 1, 2, 1, 0, 5, 6, 2, 7, sha256(b"model").digest(), 5, 0, 0, 0, 1) + material + struct.pack("<II32sQ6dfI", 0, 2, sha256(b"model").digest(), 5, 0, 0, 0, 1, 1, 1, float("nan"), 0)},
+        ))
+    assert scene.assets[1].kind == 2
 
 @pytest.mark.parametrize("material_entries", [
     (struct.pack("<BBBBIQI32sQIII", 1, 2, 1, 0, 12, 11, 0xffffffff, sha256(b"material").digest(), 8, 15, 0, 0),),
@@ -604,6 +652,8 @@ def test_rejects_diagnostic_source_path_over_16384_utf8_bytes():
 
 def _scene_import_module(monkeypatch):
     class Object(dict):
+        __eq__ = object.__eq__
+
         def __init__(self, name, data=None):
             super().__init__()
             self.name = name
@@ -615,6 +665,8 @@ def _scene_import_module(monkeypatch):
             self.rotation_mode = None
             self.rotation_quaternion = None
             self.scale = None
+            self.hide_viewport = False
+            self.hide_render = False
 
         def as_pointer(self):
             return id(self)
@@ -662,8 +714,13 @@ def _scene_import_module(monkeypatch):
             self.remove(obj)
             obj.users_collection.remove(self.collection)
 
-    class Collection:
+    class Collection(dict):
+        __hash__ = object.__hash__
+        __eq__ = object.__eq__
+        __ne__ = object.__ne__
+
         def __init__(self, name):
+            super().__init__()
             self.name = name
             self.objects = ObjectLinks()
             self.objects.collection = self
@@ -683,10 +740,20 @@ def _scene_import_module(monkeypatch):
             self.append(collection)
             return collection
 
+        def remove(self, collection, do_unlink=False):
+            if do_unlink:
+                for parent in tuple(collection.users_collection):
+                    parent.children.unlink(collection)
+            list.remove(self, collection)
+
     class Children(list):
         def link(self, collection):
             self.append(collection)
             collection.users_collection.append(self.parent)
+
+        def unlink(self, collection):
+            self.remove(collection)
+            collection.users_collection.remove(self.parent)
 
     bpy = types.ModuleType("bpy")
     root_collection = Collection("Scene Collection")
@@ -695,6 +762,7 @@ def _scene_import_module(monkeypatch):
     bpy.types = types.SimpleNamespace(Collection=Collection, Object=Object)
     logic = types.ModuleType("io_scene_ueformat.importer.logic")
     logic.UEFormatImport = object
+    logic.read_uemodel_source_lods = lambda _path: None
     monkeypatch.setitem(sys.modules, "bpy", bpy)
     monkeypatch.setitem(sys.modules, "io_scene_ueformat.importer.logic", logic)
     sys.modules.pop("io_scene_ueformat.importer.scene_import", None)
@@ -780,6 +848,95 @@ def test_scene_import_passes_plan_bundle_root_to_material_link_importer(monkeypa
     assert calls == [(options, MaterialOptions(str(bundle_root)), model)]
 
 
+def test_scene_import_rolls_back_objects_created_by_failed_model_import(monkeypatch, tmp_path: Path):
+    bundle_root = tmp_path / "bundle"
+    model = bundle_root / "models" / "cube.uemodel"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(bundle_root / "level.uescene", bundle_root)
+    scene_import, bpy, _logic = _scene_import_module(monkeypatch)
+
+    class Importer:
+        def __init__(self, _options, _material_options):
+            pass
+
+        def import_file(self, _path):
+            partial = bpy.data.objects.new("Partial model", None)
+            bpy.context.scene.collection.objects.link(partial)
+            raise RuntimeError("synthetic malformed model")
+
+    scene_import.UEFormatImport = Importer
+
+    @dataclass(frozen=True)
+    class MaterialOptions:
+        bundle_root: str | None = None
+
+    summary = scene_import.import_uescene_plan(
+        plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), MaterialOptions()
+    )
+
+    component = next(obj for obj in bpy.data.objects if obj.name == "Component")
+    assert component["uescene_import_state"] == "model_import_failed"
+    assert summary.failed_models == 1
+    assert not any(obj.name == "Partial model" for obj in bpy.data.objects)
+
+
+def test_scene_import_represents_ism_with_instances_not_copied_model_trees(monkeypatch, tmp_path: Path):
+    bundle_root = tmp_path / "bundle"
+    model = bundle_root / "models" / "cube.uemodel"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"model")
+    transforms = b"".join(
+        struct.pack("<3f4f3f", float(index), 0, 0, 0, 0, 0, 1, 1, 1, 1)
+        for index in range(3)
+    )
+    instance = struct.pack("<II", 1, 3) + struct.pack("<QQIIII", 40, 30, 3, 0, 0, 3) + transforms
+    plan = _module().UEScene.from_bytes(_scene(chunks={
+        b"META": _meta(1),
+        b"COMP": _table(1, _component(30, kind=2, instance_set=40)),
+        b"INST": instance,
+    })).build_import_plan(
+        bundle_root / "level.uescene", bundle_root
+    )
+    scene_import, bpy, _logic = _scene_import_module(monkeypatch)
+
+    class Importer:
+        def __init__(self, _options, _material_options):
+            pass
+
+        def import_file(self, _path):
+            bpy.context.scene.collection.objects.link(bpy.data.objects.new("Template mesh", None))
+
+    scene_import.UEFormatImport = Importer
+
+    @dataclass(frozen=True)
+    class MaterialOptions:
+        bundle_root: str | None = None
+
+    summary = scene_import.import_uescene_plan(
+        plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), MaterialOptions()
+    )
+
+    controller = next(
+        obj for obj in bpy.data.objects
+        if obj.get("uescene_instance_representation") == "Collection Instance"
+    )
+    instances = [obj for obj in bpy.data.objects if obj.parent is controller]
+    assert len(instances) == 3
+    assert summary.deferred_instances == 3
+    assert controller.name == "HISM Cube [3 instances]"
+    assert controller["uescene_source_template_collection"] == controller["uescene_instance_template_collection"]
+    instanced_geometry = next(child for child in summary.collection.children if child.name == "Instanced Geometry")
+    assert controller.users_collection == [instanced_geometry]
+    technical = next(child for child in summary.collection.children if child.name == "UEFormat Technical")
+    source_templates = next(child for child in technical.children if child.name == "Source Templates")
+    template = next(
+        item for item in bpy.data.collections
+        if item.name == controller["uescene_source_template_collection"]
+    )
+    assert template in source_templates.children
+
+
 def test_scene_import_returns_structured_partial_result_for_malformed_model(monkeypatch, tmp_path: Path):
     model = tmp_path / "models" / "cube.uemodel"
     model.parent.mkdir()
@@ -834,6 +991,300 @@ def test_scene_import_raises_machine_readable_failure_for_malformed_model_in_str
     assert caught.value.failures[0].code == "malformed"
 
 
+def test_scene_import_rejects_lod_manifest_mismatch_before_creating_collections(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, bpy, _logic = _scene_import_module(monkeypatch)
+    scene_import.read_uemodel_source_lods = lambda _path: types.SimpleNamespace(source_lods=frozenset({1}), material_slots={})
+
+    with pytest.raises(scene_import.RequiredModelImportError) as caught:
+        scene_import.import_uescene_plan(
+            plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object()
+        )
+
+    assert caught.value.failures[0].code == "lod_manifest_mismatch"
+    assert not bpy.data.collections
+    assert not bpy.data.objects
+
+
+def test_scene_import_rejects_mato_material_link_mismatch_before_creating_collections(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, bpy, _logic = _scene_import_module(monkeypatch)
+    scene_import.read_uemodel_source_lods = lambda _path: types.SimpleNamespace(source_lods=frozenset({0}), material_slots={0: "/Game/M_Effective"}, source_material_mapping_present=True)
+    override = _module().MaterialOverride(30, 0, 0, 0, 11, b"", 0, 0)
+    material = replace(plan.assets[0], id=11, kind=2, path="/Game/M_Override")
+    plan = replace(plan, assets=(plan.assets[0], material), components=(replace(plan.components[0], material_overrides=(override,)),))
+
+    with pytest.raises(scene_import.RequiredModelImportError) as caught:
+        scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object())
+
+    assert caught.value.failures[0].code == "mato_material_link_mismatch"
+    assert not bpy.data.collections
+    assert not bpy.data.objects
+
+
+def test_scene_import_accepts_matching_mato_material_link(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, _bpy, _logic = _scene_import_module(monkeypatch)
+    scene_import.read_uemodel_source_lods = lambda _path: types.SimpleNamespace(source_lods=frozenset({0}), material_slots={0: "/Game/M_Override"}, source_material_mapping_present=True)
+    override = _module().MaterialOverride(30, 0, 0, 0, 11, b"", 0, 0)
+    material = replace(plan.assets[0], id=11, kind=2, path="/Game/M_Override")
+    plan = replace(plan, assets=(plan.assets[0], material), components=(replace(plan.components[0], material_overrides=(override,)),))
+
+    class Importer:
+        def __init__(self, _options, _material_options):
+            pass
+
+        def import_file(self, _path):
+            pass
+
+    scene_import.UEFormatImport = Importer
+    summary = scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object())
+
+    assert summary.imported_static_meshes == 1
+
+
+def test_scene_import_maps_mato_slot_ordinal_by_source_material_index(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, _bpy, _logic = _scene_import_module(monkeypatch)
+    scene_import.read_uemodel_source_lods = lambda _path: types.SimpleNamespace(
+        source_lods=frozenset({0}),
+        material_slots={1: "/Game/M_Source1", 0: "/Game/M_Source0"},
+        source_material_mapping_present=True,
+    )
+    override = _module().MaterialOverride(30, 1, 0, 0, 11, b"", 0, 0)
+    material = replace(plan.assets[0], id=11, kind=2, path="/Game/M_Source1")
+    plan = replace(plan, assets=(plan.assets[0], material), components=(replace(plan.components[0], material_overrides=(override,)),))
+
+    scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object())
+
+
+def test_scene_import_accepts_shared_source_material_identity(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, _bpy, _logic = _scene_import_module(monkeypatch)
+    scene_import.read_uemodel_source_lods = lambda _path: types.SimpleNamespace(
+        source_lods=frozenset({0}),
+        material_slots={0: "/Game/M_Source.M_Source", 1: "/Game/M_Source"},
+        source_material_mapping_present=True,
+    )
+    override = _module().MaterialOverride(30, 0, 0, 0, 11, b"", 0, 0)
+    material = replace(plan.assets[0], id=11, kind=2, path="/Game/M_Source")
+    plan = replace(plan, assets=(plan.assets[0], material), components=(replace(plan.components[0], material_overrides=(override,)),))
+    scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object())
+
+
+def test_scene_import_rejects_ambiguous_shared_source_material_identity(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, bpy, _logic = _scene_import_module(monkeypatch)
+    imported = []
+    class Importer:
+        def __init__(self, _options, _material_options):
+            imported.append("constructed")
+
+        def import_file(self, _path):
+            imported.append("imported")
+
+    scene_import.UEFormatImport = Importer
+    scene_import.read_uemodel_source_lods = lambda _path: (_ for _ in ()).throw(
+        scene_import.UEMODELSourceMaterialAmbiguityError(
+            "mato_source_material_mapping_ambiguous: source material index 0 has conflicting identities"
+        )
+    )
+    with pytest.raises(scene_import.RequiredModelImportError) as caught:
+        scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object())
+    assert caught.value.failures[0].code == "mato_source_material_mapping_ambiguous"
+    assert imported == []
+    assert not bpy.data.collections
+
+
+def test_scene_import_rejects_absent_source_material_mapping(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, _bpy, _logic = _scene_import_module(monkeypatch)
+    scene_import.read_uemodel_source_lods = lambda _path: types.SimpleNamespace(
+        source_lods=frozenset({0}), material_slots={}, source_material_mapping_present=True,
+    )
+    override = _module().MaterialOverride(30, 0, 0, 0, 11, b"", 0, 0)
+    material = replace(plan.assets[0], id=11, kind=2, path="/Game/M_Source")
+    plan = replace(plan, assets=(plan.assets[0], material), components=(replace(plan.components[0], material_overrides=(override,)),))
+    with pytest.raises(scene_import.RequiredModelImportError) as caught:
+        scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object())
+    assert caught.value.failures[0].code == "mato_source_material_mapping_missing"
+
+
+def test_scene_import_rejects_mato_without_source_material_mapping(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, _bpy, _logic = _scene_import_module(monkeypatch)
+    scene_import.read_uemodel_source_lods = lambda _path: types.SimpleNamespace(
+        source_lods=frozenset({0}), material_slots={0: "/Game/M_OldV1"}, source_material_mapping_present=False,
+    )
+    override = _module().MaterialOverride(30, 0, 0, 0, 11, b"", 0, 0)
+    material = replace(plan.assets[0], id=11, kind=2, path="/Game/M_OldV1")
+    plan = replace(plan, assets=(plan.assets[0], material), components=(replace(plan.components[0], material_overrides=(override,)),))
+
+    with pytest.raises(scene_import.RequiredModelImportError) as caught:
+        scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object())
+    assert "source material mapping" in caught.value.failures[0].detail
+
+
+def test_scene_import_accepts_valid_unreal_material_object_alias(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, _bpy, _logic = _scene_import_module(monkeypatch)
+    scene_import.read_uemodel_source_lods = lambda _path: types.SimpleNamespace(
+        source_lods=frozenset({0}), material_slots={0: "/Game/M_Override.M_Override"}, source_material_mapping_present=True
+    )
+    override = _module().MaterialOverride(30, 0, 0, 0, 11, b"", 0, 0)
+    material = replace(plan.assets[0], id=11, kind=2, path="/Game/M_Override")
+    plan = replace(plan, assets=(plan.assets[0], material), components=(replace(plan.components[0], material_overrides=(override,)),))
+
+    scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object())
+
+
+def test_scene_import_accepts_unreal_material_link_without_leading_slash(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, _bpy, _logic = _scene_import_module(monkeypatch)
+    scene_import.read_uemodel_source_lods = lambda _path: types.SimpleNamespace(
+        source_lods=frozenset({0}), material_slots={0: "Engine/M_Override.M_Override"}, source_material_mapping_present=True
+    )
+    override = _module().MaterialOverride(30, 0, 0, 0, 11, b"", 0, 0)
+    material = replace(plan.assets[0], id=11, kind=2, path="/Engine/M_Override")
+    plan = replace(plan, assets=(plan.assets[0], material), components=(replace(plan.components[0], material_overrides=(override,)),))
+
+    scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object())
+
+
+def test_scene_import_rejects_identical_malformed_mato_material_link(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, bpy, _logic = _scene_import_module(monkeypatch)
+    malformed = "/Game//M"
+    scene_import.read_uemodel_source_lods = lambda _path: types.SimpleNamespace(
+        source_lods=frozenset({0}), material_slots={0: malformed}, source_material_mapping_present=True
+    )
+    override = _module().MaterialOverride(30, 0, 0, 0, 11, b"", 0, 0)
+    material = replace(plan.assets[0], id=11, kind=2, path=malformed)
+    plan = replace(plan, assets=(plan.assets[0], material), components=(replace(plan.components[0], material_overrides=(override,)),))
+
+    with pytest.raises(scene_import.RequiredModelImportError) as caught:
+        scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object())
+
+    assert caught.value.failures[0].code == "mato_material_link_mismatch"
+    assert not bpy.data.collections
+
+
+def test_strict_scene_import_failure_keeps_existing_source_graph(monkeypatch, tmp_path: Path):
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, bpy, _logic = _scene_import_module(monkeypatch)
+    options = types.SimpleNamespace(scale_factor=1.0, target_lod=0)
+    previous = scene_import.import_uescene_plan(plan, options, object())
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+
+    class Importer:
+        def __init__(self, _options, _material_options):
+            pass
+
+        def import_file(self, _path):
+            bpy.context.scene.collection.objects.link(bpy.data.objects.new("Partial model", None))
+            raise ValueError("malformed model")
+
+    scene_import.UEFormatImport = Importer
+    with pytest.raises(scene_import.RequiredModelImportError):
+        scene_import.import_uescene_plan(plan, options, object(), strict_required_models=True)
+
+    assert any(collection is previous.collection for collection in bpy.data.collections)
+    assert any(obj.name == "Actor" for obj in bpy.data.objects)
+    assert not any("_staging" in collection.name for collection in bpy.data.collections)
+    assert not any(obj.name == "Partial model" for obj in bpy.data.objects)
+
+
+def test_strict_scene_import_promotes_candidate_after_success(monkeypatch, tmp_path: Path):
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, bpy, _logic = _scene_import_module(monkeypatch)
+    options = types.SimpleNamespace(scale_factor=1.0, target_lod=0)
+    previous = scene_import.import_uescene_plan(plan, options, object())
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+
+    class Importer:
+        def __init__(self, _options, _material_options):
+            pass
+
+        def import_file(self, _path):
+            bpy.context.scene.collection.objects.link(bpy.data.objects.new("Imported model", None))
+
+    scene_import.UEFormatImport = Importer
+    summary = scene_import.import_uescene_plan(plan, options, object(), strict_required_models=True)
+
+    source_key = scene_import._scene_source_key(plan)
+    assert not any(collection is previous.collection for collection in bpy.data.collections)
+    assert summary.collection in bpy.context.scene.collection.children
+    assert summary.collection.name == "Import_uescene"
+    assert summary.collection["uescene_source_key"] == source_key
+    assert [collection for collection in bpy.data.collections if collection.get("uescene_source_key") == source_key] == [summary.collection]
+    assert not any("_staging" in collection.name for collection in bpy.data.collections)
+
+
+def test_strict_scene_import_missing_requested_lod_keeps_existing_source_graph(monkeypatch, tmp_path: Path):
+    model = tmp_path / "models" / "cube.uemodel"
+    model.parent.mkdir()
+    model.write_bytes(b"model")
+    asset = struct.pack("<QBBBBIIII32sQIIII", 10, 1, 2, 1, 0, 5, 6, 2, 7, sha256(b"model").digest(), 5, 0, 0, 0, 1)
+    lod = struct.pack("<II32sQ6dfI", 0, 2, sha256(b"lod").digest(), 4, 0, 0, 0, 1, 1, 1, float("nan"), 0)
+    plan = _module().UEScene.from_bytes(_scene(chunks={b"ASST": struct.pack("<II", 1, 1) + asset + lod})).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    scene_import, bpy, _logic = _scene_import_module(monkeypatch)
+    previous = scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=0), object())
+
+    class Importer:
+        def __init__(self, _options, _material_options):
+            pass
+
+        def import_file(self, _path):
+            bpy.context.scene.collection.objects.link(bpy.data.objects.new("Imported model", None))
+
+    scene_import.UEFormatImport = Importer
+    with pytest.raises(scene_import.RequiredModelImportError) as caught:
+        scene_import.import_uescene_plan(plan, types.SimpleNamespace(scale_factor=1.0, target_lod=1), object(), strict_required_models=True)
+
+    assert caught.value.failures[0].code == "requested_lod_unavailable"
+    assert any(collection is previous.collection for collection in bpy.data.collections)
+    assert not any("_staging" in collection.name for collection in bpy.data.collections)
+
+
 def test_scene_import_keeps_mato_as_provenance_after_model_material_link_import(monkeypatch, tmp_path: Path):
     bundle_root = tmp_path / "bundle"
     model = bundle_root / "models" / "cube.uemodel"
@@ -874,10 +1325,42 @@ def test_scene_import_groups_each_import_under_a_safe_unique_collection(monkeypa
     first = scene_import.import_uescene_plan(plan, options, object())
     second = scene_import.import_uescene_plan(plan, options, object())
 
-    assert [first.collection.name, second.collection.name] == ["City_Night_uescene", "City_Night_uescene.001"]
-    assert list(bpy.context.scene.collection.children) == [first.collection, second.collection]
-    assert all(first.collection in obj.users_collection for obj in first.collection.objects)
-    assert all(second.collection in obj.users_collection for obj in second.collection.objects)
+    assert [first.collection.name, second.collection.name] == ["City_Night_uescene", "City_Night_uescene"]
+    assert all(collection is not first.collection for collection in bpy.data.collections)
+    assert second.collection in bpy.data.collections
+
+
+def test_scene_import_collapses_repeated_terminal_world_name_without_changing_provenance(monkeypatch, tmp_path: Path):
+    source_world_path = "/Game/Maps/House/photo/house_photo001.house_photo001"
+    plan = _module().UEScene.from_bytes(_scene()).build_import_plan(tmp_path / "level.uescene", tmp_path)
+    plan = replace(plan, provenance=replace(plan.provenance, source_world_path=source_world_path))
+    scene_import, _bpy, _logic = _scene_import_module(monkeypatch)
+
+    summary = scene_import.import_uescene_plan(
+        plan, types.SimpleNamespace(scale_factor=1.0, target_lod=2), object()
+    )
+
+    assert plan.provenance.source_world_path == source_world_path
+    assert summary.collection.name == "house_photo001_uescene"
+    assert summary.collection["uescene_source_key"] == scene_import._scene_source_key(plan)
+    assert source_world_path in summary.collection["uescene_source_key"]
+
+
+@pytest.mark.parametrize("source_world_path, expected", [
+    ("/Game/Maps/House/photo/house_photo001.house_photo002", "house_photo001.house_photo002"),
+    ("/Game/Maps/House/photo/house_photo001", "house_photo001"),
+    ("house_photo001.house_photo001", "house_photo001.house_photo001"),
+    ("/Game//house_photo001.house_photo001", "house_photo001.house_photo001"),
+    ("/Game/House/photo/house photo.house photo", "house_photo"),
+    ("/Game/House/photo/house:photo.house:photo", "house_photo"),
+    ("/Game/House/photo/house.photo.house.photo", "house.photo.house.photo"),
+    ("/Game/House.Name/photo/house_photo001.house_photo001", "house_photo001.house_photo001"),
+    ("/Game/Maps/M+N.M+N", "M_N"),
+])
+def test_scene_name_keeps_noncanonical_repeated_tokens_under_existing_sanitization(monkeypatch, source_world_path, expected):
+    scene_import, _bpy, _logic = _scene_import_module(monkeypatch)
+
+    assert scene_import._scene_name(source_world_path) == expected
 
 
 def test_scene_import_preserves_large_uescene_ids_as_decimal_properties(monkeypatch, tmp_path: Path):
@@ -965,7 +1448,7 @@ def test_scene_import_materializes_all_native_light_types(monkeypatch, tmp_path:
     sun, point, spot, rect = (light_objects[kind] for kind in ("SUN", "POINT", "SPOT", "AREA"))
     component = objects["Component"]
     assert sun.parent is objects["Actor"] and point.parent is component and spot.parent is component and rect.parent is component
-    assert sun.location == (0.01, 0.02, 0.03) and sun.rotation_quaternion == (1.0, 0.0, 0.0, 0.0)
+    assert sun.location == (0.01, -0.02, 0.03) and sun.rotation_quaternion == (-1.0, 0.0, 0.0, 0.0)
     assert sun.data.color == (1.0, 240 / 255, 200 / 255) and sun.data.use_shadow is True
     assert sun.data.angle == pytest.approx(__import__("math").radians(10))
     assert point.data.energy == 42 and point.data.use_custom_distance is True
@@ -995,7 +1478,14 @@ def test_scene_import_groups_resources_by_map_and_type(monkeypatch, tmp_path: Pa
     assert summary.collection.name == "Import_uescene"
     assert summary.models_collection.name == "Import_Models"
     assert summary.lights_collection.name == "Import_Lights"
-    assert set(summary.collection.children) == {summary.models_collection, summary.lights_collection}
+    children = {child.name: child for child in summary.collection.children}
+    assert children == {
+        "Import_Models": summary.models_collection,
+        "Import_Lights": summary.lights_collection,
+        "Instanced Geometry": children["Instanced Geometry"],
+        "UEFormat Technical": children["UEFormat Technical"],
+    }
+    assert [child.name for child in children["UEFormat Technical"].children] == ["Source Templates"]
     assert not any(collection.name == "Import_Probes" for collection in bpy.data.collections)
     actor = next(obj for obj in bpy.data.objects if obj.name == "Actor")
     component = next(obj for obj in bpy.data.objects if obj.name == "Component")

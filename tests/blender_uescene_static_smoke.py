@@ -10,8 +10,9 @@ from pathlib import Path
 import bpy
 
 
+REPOSITORY = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = Path(os.environ.get(
-    "UESCENE_ADDON_ROOT", Path(__file__).resolve().parents[1] / "plugins" / "blender"
+    "UESCENE_ADDON_ROOT", REPOSITORY / "plugins" / "blender"
 ))
 sys.path.insert(0, str(PLUGIN_ROOT))
 
@@ -50,7 +51,7 @@ def _light(ident, light_type, flags, **values):
         fields["barn_door_length"],
     )
 
-def write_scene(path, uri=b"Models/present.uemodel", optional_features=0):
+def write_scene(path, uri=b"Models/present.uemodel", optional_features=0, model_bytes=b"present"):
     asset_id = 2 ** 31 + 10
     actor_id = 2 ** 31 + 20
     component_id = 2 ** 31 + 30
@@ -60,19 +61,20 @@ def write_scene(path, uri=b"Models/present.uemodel", optional_features=0):
         b"/Game/Actor", b"ComponentClass", b"/Game/Component",
     ])
     meta = struct.pack("<I8IQ4BIQQ", 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, optional_features)
-    model_hash = sha256(b"present").digest()
+    model_hash = sha256(model_bytes).digest()
+    model_length = len(model_bytes)
     chunks = {
         b"META": meta,
         b"STRS": strings,
         b"ASST": struct.pack("<II", 1, 1) + struct.pack(
-            "<QBBBBIIII32sQIIII", asset_id, 1, 2, 1, 0, 5, 6, 2, 7, model_hash, 7, 0, 0, 0, 1
+            "<QBBBBIIII32sQIIII", asset_id, 1, 2, 1, 0, 5, 6, 2, 7, model_hash, model_length, 0, 0, 0, 1
         ) + struct.pack("<II32sQ6dfI", 0, 2, model_hash, 7, 0, 0, 0, 1, 1, 1, float("nan"), 0),
         b"ACTR": _table(1, struct.pack("<QQIIIQQIIIII", actor_id, 0, 3, 8, 9, component_id, 100, 0, 1, 0, 0, 0)),
         b"COMP": _table(1, struct.pack("<QQQB3xIIIQQIIQIIII", component_id, actor_id, 0, 1, 4, 10, 11, 101, asset_id, 0, 0, 0, 0, 0, 0, 0)),
         b"XFRM": _table(2, struct.pack("<Q3d4f3fI", 100, 1, 2, 3, 0, 0, 0, 1, 1, 1, 1, 0) + struct.pack("<Q3d4f3fI", 101, 4, 5, 6, 0, 0, 0, 1, 1, 1, 1, 0)),
         b"MATO": struct.pack("<II", 0, 0),
         b"DIAG": struct.pack("<II", 0, 0),
-        b"BNDX": _table(1, struct.pack("<BBBBIQI32sQIII", 1, 2, 1, 0, 2, asset_id, 0xffffffff, model_hash, 7, 7, 0, 0)),
+        b"BNDX": _table(1, struct.pack("<BBBBIQI32sQIII", 1, 2, 1, 0, 2, asset_id, 0xffffffff, model_hash, model_length, 7, 0, 0)),
     }
     if optional_features & 2:
         chunks[b"LITE"] = _table(4, b"".join((
@@ -143,6 +145,8 @@ try:
         assert lights[2].data.spot_size > 0 and lights[3].data.shape == "RECTANGLE"
         assert not [obj for obj in imported.all_objects if obj.type == "CAMERA"]
         settings.strict_uescene_models = True
+        previous_import = imported
+        previous_objects = set(imported.all_objects)
         try:
             strict_result = bpy.ops.uf.import_uescene(filepath=str(scene_path))
         except RuntimeError:
@@ -152,6 +156,19 @@ try:
         strict_status = json.loads(settings.last_import_status)
         assert strict_status["outcome"] == "failed"
         assert strict_status["required_model_failures"][0]["code"] == "malformed"
+        assert bpy.data.collections["Import_uescene"] is previous_import
+        assert set(previous_import.all_objects) == previous_objects
+        assert not [collection for collection in bpy.data.collections if "_staging" in collection.name]
+        valid_model = REPOSITORY / "tests" / "fixtures" / "fmodel_golden.uemodel"
+        valid_bytes = valid_model.read_bytes()
+        model_path.write_bytes(valid_bytes)
+        write_scene(scene_path, b"Content/Meshes/present.uemodel", 3, valid_bytes)
+        strict_success = bpy.ops.uf.import_uescene(filepath=str(scene_path))
+        assert strict_success == {"FINISHED"}
+        promoted_import = bpy.data.collections["Import_uescene"]
+        assert promoted_import is not previous_import
+        assert len([collection for collection in bpy.data.collections if collection.name.startswith("Import_uescene")]) == 1
+        assert not [collection for collection in bpy.data.collections if "_staging" in collection.name]
         before_invalid = set(bpy.data.collections)
         try:
             result = bpy.ops.uf.import_uescene(filepath=str(invalid_path))

@@ -11,6 +11,33 @@ Binary layout for `.ueanim` files (`Identifier = "UEANIM"`).
 | `METADATA` | `1` | [FAnimMetadata](#structures) |
 | `TRACKS` | track count | [FTrack](#structures) x `Count` |
 | `CURVES` | curve count | [FCurve](#structures) x `Count` |
+| `FMODEL_TARGET_SKELETON` | `1` | Optional FModel target-skeleton identity extension v1; ignored by upstream readers as an unknown top-level chunk |
+
+### `FMODEL_TARGET_SKELETON`
+
+This optional singleton is written after all standard animation chunks when a
+resolved target `USkeleton` is available. Its payload is, in order:
+
+```text
+uint8 Version                 // 1
+FString SourceAnimationPath    // canonical exported animation object path
+FString SkeletonPath           // canonical resolved USkeleton object path
+uint8 HasSkeletonGuid          // exactly 0 or 1
+byte[16] SkeletonGuid          // present only when HasSkeletonGuid is 1
+byte[32] BoneLayoutHash        // same deterministic hash as the model chunk
+```
+
+For FModel-provenanced imports, Blender compares the target skeleton path,
+optionally compares GUID when both sides provide it, and requires an exact
+layout hash before creating or assigning an Action. If either side lacks
+identity, import remains available with one unverified-identity diagnostic.
+Manual/legacy animation import therefore remains supported. This extension
+does not add animation discovery, scanning, manifests, bundles, or a new file
+format.
+
+The deterministic identity fixture `tests/fixtures/fmodel_target_skeleton.ueanim`
+is generated from the current FModel writer test and has SHA-256
+`4af1eaca0bf69aae85f788bd33e2d55d351f70d94527148c02e6f8352a244cf2`.
 
 ---
 

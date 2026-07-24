@@ -187,6 +187,7 @@ class UEScene:
         for e in entries:
             payload=data[e.offset:e.offset+e.stored_length]
             if zlib.crc32(payload)&0xffffffff!=e.crc32: raise UESceneError("chunk CRC does not match")
+            if e.name==b"CAMR": raise UESceneError("CAMR camera records are retired in UEScene V1")
             if e.name not in _KNOWN:
                 if e.flags: raise UESceneError("unknown chunk has required flags")
                 continue
@@ -197,6 +198,7 @@ class UEScene:
         if missing: raise UESceneError("missing required V1 chunk")
         strings=_strings(*chunks[b"STRS"]); meta=_meta(chunks[b"META"][1],strings)
         if meta.required_features&~3: raise UESceneError("unknown required feature bits")
+        if meta.optional_features&4: raise UESceneError("CAMR camera records are retired in UEScene V1")
         has_inst=b"INST" in chunks
         if bool(meta.required_features&1)!=has_inst: raise UESceneError("INST feature and chunk disagree")
         has_lite=b"LITE" in chunks
@@ -212,7 +214,7 @@ class UEScene:
         for a in self.assets:
             _range(a.lod_start,a.lod_count,len(self.lods),"asset LOD");
             if a.lod_count>_MAX_LODS_PER_ASSET: raise UESceneError("asset LOD count exceeds 64")
-            if a.kind==1 and [self.lods[a.lod_start+i].index for i in range(a.lod_count)]!=list(range(a.lod_count)): raise UESceneError("StaticMesh LODs must be contiguous")
+            if a.kind==1 and len({self.lods[a.lod_start+i].index for i in range(a.lod_count)})!=a.lod_count: raise UESceneError("StaticMesh source LOD indices must be unique")
             if a.kind!=1 and (a.lod_start or a.lod_count): raise UESceneError("non-mesh asset has LODs")
             _range(a.diagnostic_start,a.diagnostic_count,len(self.diagnostics),"asset diagnostic")
             if a.location==3: raise UESceneError("Embedded assets are unsupported in V1")
@@ -273,8 +275,10 @@ class UEScene:
         required={}; optional={}
         for a in self.assets:
             if a.availability==1:
-                target=optional if a.kind==2 else required
-                target[(a.id,0xffffffff)]=({1:1,2:2,3:3}[a.kind],a.uri,a.sha256,a.byte_length,a.mime,a.location)
+                source=({1:1,2:2,3:3}[a.kind],a.uri,a.sha256,a.byte_length,a.mime,a.location)
+                # Static meshes cannot be imported without their primary model
+                # sidecar. MaterialJson sidecars are optional resources.
+                (optional if a.kind==2 else required)[(a.id,0xffffffff)]=source
         actual={}
         for entry in self.bundle_entries:
             key=(entry.owner_asset_id,entry.lod_index)
@@ -288,17 +292,17 @@ class UEScene:
         _validate_diagnostics(self.assets,self.actors,self.components,self.instance_sets,self.material_overrides,self.bundle_entries,self.diagnostics)
     def build_import_plan(self,scene_path:Path,bundle_root:Path|None,strict_required_models:bool=False)->UESceneImportPlan:
         warnings=[]; failures=[]; entries={(b.owner_asset_id,b.lod_index):b for b in self.bundle_entries}; sets={s.id:s for s in self.instance_sets}; xfrms={x.id:x for x in self.transforms}; plan=[]
+        referenced_meshes={component.mesh_asset_id for component in self.components}
         for asset in self.assets:
             if asset.location==1: _resolve_uri(asset.uri,asset.location,scene_path,bundle_root)
             for lod in self.lods[asset.lod_start:asset.lod_start+asset.lod_count]:
                 if asset.location==1: _resolve_uri(lod.uri,asset.location,scene_path,bundle_root)
         for entry in self.bundle_entries:
-            if entry.kind in (2,3) and entry.availability==1:
+            if entry.availability==1 and (entry.kind!=1 or entry.owner_asset_id not in referenced_meshes):
                 resource=_resolve_uri(entry.uri,entry.location,scene_path,bundle_root)
                 contents=_read_file(resource)
                 if contents is None or contents[0]!=entry.byte_length or sha256(contents[1]).digest()!=entry.sha256:
-                    if entry.kind==2: warnings.append("optional material sidecar does not match BNDX")
-                    else: raise UESceneError("bundle sidecar does not match BNDX")
+                    raise UESceneError("bundle sidecar does not match BNDX")
             elif entry.location==1: _resolve_uri(entry.uri,entry.location,scene_path,bundle_root)
         for c in self.components:
             model=None; a=next(a for a in self.assets if a.id==c.mesh_asset_id)
@@ -392,6 +396,7 @@ def _assets(e:_Entry,p:bytes,s:tuple[str,...]):
     for _ in range(lodn):
         v=struct.unpack_from("<II32sQ6dfI",p,at)
         screen_bits=struct.unpack_from("<I",p,at+96)[0]; at+=104
+        if any(struct.unpack_from("<Q",p,at-104+offset)[0]==0x8000000000000000 for offset in (48,56,64,72,80,88)) or screen_bits==0x80000000: raise UESceneError("LOD negative zero is noncanonical")
         if v[-1] or not all(isfinite(x) for x in v[4:10]) or any(v[4+i]>v[7+i] for i in range(3)) or (not isfinite(v[10]) and screen_bits!=0x7fc00000): raise UESceneError("invalid LOD bounds or screen size")
         lods.append(MeshLod(v[0],_required_uri(s,v[1]),v[2],v[3],v[4:7],v[7:10],v[10]))
     return tuple(assets),tuple(lods)
@@ -421,7 +426,8 @@ def _transforms(e,p):
     if len(p)!=4+n*64: raise UESceneError("invalid XFRM size")
     out=[]
     for i in range(n):
-        v=struct.unpack_from("<Q3d4f3fI",p,4+i*64)
+        at=4+i*64; v=struct.unpack_from("<Q3d4f3fI",p,at)
+        if any(struct.unpack_from("<Q",p,at+offset)[0]==0x8000000000000000 for offset in (8,16,24)) or any(struct.unpack_from("<I",p,at+offset)[0]==0x80000000 for offset in range(32,60,4)): raise UESceneError("XFRM negative zero is noncanonical")
         if v[-1]: raise UESceneError("transform reserved field is nonzero")
         _finite(v[1:-1],"transform"); q=v[4:8]
         if abs(sqrt(sum(x*x for x in q))-1)>1e-4: raise UESceneError("transform quaternion is not normalized")
@@ -479,7 +485,9 @@ def _instances(e,p,s):
     _owned_ranges(((v[4],v[5]) for v in records),tn,"instance transform")
     transforms=[]
     for i in range(tn):
-        v=struct.unpack_from("<3f4f3f",p,8+n*32+i*40); _finite(v,"instance transform")
+        at=8+n*32+i*40; v=struct.unpack_from("<3f4f3f",p,at)
+        if any(struct.unpack_from("<I",p,at+offset)[0]==0x80000000 for offset in range(0,40,4)): raise UESceneError("INST negative zero is noncanonical")
+        _finite(v,"instance transform")
         q=v[3:7]
         if abs(sqrt(sum(x*x for x in q))-1)>1e-4: raise UESceneError("instance transform quaternion is not normalized")
         transforms.append(InstanceTransform(v[:3],q,v[7:]))

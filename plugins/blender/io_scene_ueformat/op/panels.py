@@ -17,6 +17,7 @@ class UEFORMAT_PT_Layout:  # noqa: N801
         box = obj.layout.box()
         box.label(text="Scene Import", icon="SCENE_DATA")
         box.row().prop(settings, "flatten_uescene_hierarchy")
+        box.row().prop(settings, "flatten_uescene_instances")
         box.row().prop(settings, "strict_uescene_models")
         if import_menu:
             return

@@ -21,6 +21,7 @@ class UFSettings(PropertyGroup):
     fmodel_ue_export_root: StringProperty(name="UE Export Root", default="", subtype="DIR_PATH")
     fmodel_bundle_root: StringProperty(name="Bundle Root", default="", subtype="DIR_PATH")
     flatten_uescene_hierarchy: BoolProperty(name="Flatten UEScene Hierarchy", default=True)
+    flatten_uescene_instances: BoolProperty(name="Flatten UEScene Instances", default=False)
     strict_uescene_models: BoolProperty(name="Strict Required Models", default=True)
 
     rotation_only: BoolProperty(name="Rotation Only", default=False)

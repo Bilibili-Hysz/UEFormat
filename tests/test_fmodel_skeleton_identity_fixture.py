@@ -9,7 +9,7 @@ from tests.test_fmodel_skeleton_identity import animation_archive, classes, read
 FIXTURES = Path(__file__).with_name("fixtures")
 MODEL = FIXTURES / "fmodel_skeleton_identity.uemodel"
 ANIMATION = FIXTURES / "fmodel_target_skeleton.ueanim"
-DOCUMENTED_MODEL_HASH = "f6e10f736fea2356f23917a0be186c8b7fee784a2d745b3d65a81ed636957ddc"
+DOCUMENTED_MODEL_HASH = "25d70f86a61c7053d83ffe43240c13e5f7081b055bb05db8a7526b68d1badb6d"
 DOCUMENTED_ANIMATION_HASH = "4af1eaca0bf69aae85f788bd33e2d55d351f70d94527148c02e6f8352a244cf2"
 
 
@@ -34,6 +34,7 @@ def test_identity_fixtures_are_valid_standard_archives_with_extensions():
     model = classes.UEModel.from_archive(model_reader)
     assert model.skeleton is not None
     assert model.skeleton_identity is not None
+    assert [lod.name for lod in model.lods] == ["LOD0"]
 
     anim_reader = animation_archive(anim_data)
     anim_reader.read_string(len(classes.MAGIC))

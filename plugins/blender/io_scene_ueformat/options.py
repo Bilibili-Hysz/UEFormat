@@ -33,6 +33,13 @@ class UEModelOptions(UEFormatOptions):
     import_virtual_bones: bool = False
     target_lod: int = 0
     allowed_reorient_children: dict = None
+    import_fmodel_materials: bool = True
+    build_fmodel_material_nodes: bool = True
+    load_fmodel_embedded_textures: bool = True
+    load_fmodel_external_textures: bool = True
+    keep_fmodel_unmapped_parameters: bool = True
+    fmodel_ue_export_root: str = ""
+    fmodel_bundle_root: str = ""
 
 
 @dataclass(slots=True)

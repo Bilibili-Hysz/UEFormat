@@ -55,7 +55,7 @@ _UESCENE_HIERARCHY_PROPERTIES = {
     "uescene_class_path",
     "uescene_asset_id", "uescene_asset_name", "uescene_asset_path", "uescene_model_path",
     "uescene_material_overrides", "uescene_import_state", "uescene_instance_set_id",
-    "uescene_instance_count",
+    "uescene_instance_count", "uescene_visibility_flags",
 }
 
 
@@ -69,8 +69,56 @@ def _is_flattenable_uescene_empty(obj) -> bool:
     )
 
 
-def flatten_uescene_hierarchy(collection) -> int:
+def _flatten_uescene_instances(collection) -> int:
+    """Materialize imported collection instances, then remove their source templates."""
+    controllers = [
+        obj for obj in collection.all_objects
+        if obj.get("uescene_instance_representation") == "Collection Instance"
+    ]
+    removed = 0
+    templates = set()
+    bpy.context.view_layer.update()
+    for controller in controllers:
+        for instance in tuple(controller.children):
+            template = instance.instance_collection
+            if instance.instance_type != "COLLECTION" or template is None:
+                continue
+            templates.add(template)
+            copies = {}
+            for source in template.all_objects:
+                copy = source.copy()
+                if source.data is not None:
+                    copy.data = source.data
+                collection.objects.link(copy)
+                copy.matrix_world = instance.matrix_world @ source.matrix_world
+                copies[source.as_pointer()] = copy
+            for source in template.all_objects:
+                copy = copies[source.as_pointer()]
+                if source.parent is not None and source.parent.as_pointer() in copies:
+                    copy.parent = copies[source.parent.as_pointer()]
+                    copy.matrix_parent_inverse = source.matrix_parent_inverse
+            bpy.data.objects.remove(instance, do_unlink=True)
+        bpy.data.objects.remove(controller, do_unlink=True)
+        removed += 1
+    for template in templates:
+        for source in tuple(template.all_objects):
+            bpy.data.objects.remove(source, do_unlink=True)
+        bpy.data.collections.remove(template, do_unlink=True)
+    for child in tuple(collection.children):
+        if child.name == "Instanced Geometry" and not child.objects and not child.children:
+            bpy.data.collections.remove(child, do_unlink=True)
+        elif child.name == "UEFormat Technical":
+            for technical_child in tuple(child.children):
+                if technical_child.name == "Source Templates" and not technical_child.objects and not technical_child.children:
+                    bpy.data.collections.remove(technical_child, do_unlink=True)
+            if not child.objects and not child.children:
+                bpy.data.collections.remove(child, do_unlink=True)
+    return removed
+
+
+def flatten_uescene_hierarchy(collection, flatten_instances: bool = False) -> int:
     """Remove imported hierarchy empties without changing child world transforms."""
+    removed_instances = _flatten_uescene_instances(collection) if flatten_instances else 0
     bpy.context.view_layer.update()
     candidates = [obj for obj in collection.all_objects if _is_flattenable_uescene_empty(obj)]
     world_matrices = {
@@ -99,7 +147,7 @@ def flatten_uescene_hierarchy(collection) -> int:
         matrix = world_matrices.get(obj.as_pointer())
         if matrix is not None:
             obj.matrix_world = matrix
-    return removed
+    return removed + removed_instances
 
 
 class UFImportBase(Operator, ImportHelper, Generic[T]):
@@ -310,13 +358,15 @@ class UFImportUEScene(Operator, ImportHelper):
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
         _set_scene_import_status(settings, summary.outcome, summary.required_model_failures)
-        flattened = flatten_uescene_hierarchy(summary.collection) if settings.flatten_uescene_hierarchy else 0
+        flattened = flatten_uescene_hierarchy(
+            summary.collection, settings.flatten_uescene_instances,
+        ) if (settings.flatten_uescene_hierarchy or settings.flatten_uescene_instances) else 0
         message = (
             f"Imported {summary.imported_actors} actor(s), {summary.imported_components} component(s), "
             f"{summary.imported_static_meshes} static mesh(es), and {summary.imported_lights} light(s); {summary.unresolved_models} unresolved, "
             f"{summary.failed_models} failed, {summary.deferred_instances} deferred"
         )
-        if settings.flatten_uescene_hierarchy:
+        if settings.flatten_uescene_hierarchy or settings.flatten_uescene_instances:
             message += f", {flattened} hierarchy node(s) flattened"
         if summary.warnings or plan.diagnostics:
             self.report({"WARNING"}, message)
@@ -369,7 +419,7 @@ class UFFlattenUESceneHierarchy(Operator):
 
     def execute(self, context: UFormatContext) -> set[str]:
         collection = context.collection
-        removed = flatten_uescene_hierarchy(collection)
+        removed = flatten_uescene_hierarchy(collection, flatten_instances=True)
         settings = context.scene.uf_settings
         if settings.last_import_report:
             settings.last_import_summary = f"Flattened {removed} UEScene hierarchy node(s)"

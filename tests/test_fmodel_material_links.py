@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import importlib
+import gzip
 import json
+import os
 from pathlib import Path
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -39,9 +44,25 @@ def _load_importer_modules():
     )
 
 
+def _load_logic_module():
+    bpy_extras = types.ModuleType("bpy_extras")
+    bpy_extras.anim_utils = types.ModuleType("bpy_extras.anim_utils")
+    sys.modules["bpy_extras"] = bpy_extras
+    sys.modules["bpy_extras.anim_utils"] = bpy_extras.anim_utils
+    for name in (
+        "Action", "ArmatureModifier", "ByteColorAttribute", "EditBone", "FCurve",
+        "Object", "PoseBone", "Armature", "bpy_prop_collection",
+    ):
+        setattr(bpy_types, name, object)
+    mathutils.Matrix = tuple
+    sys.modules.pop("io_scene_ueformat.importer.logic", None)
+    return importlib.import_module("io_scene_ueformat.importer.logic")
+
+
 classes, reader, fmodel = _load_importer_modules()
 material_builder = importlib.import_module("io_scene_ueformat.importer.material_builder")
 material_images = importlib.import_module("io_scene_ueformat.importer.material_images")
+logic = _load_logic_module()
 
 
 def fstring(value: str) -> bytes:
@@ -60,12 +81,17 @@ def material_links_payload(
     slot_count: int = 1,
     parameter_count: int = 3,
     parameter_kind: int = 1,
+    source_material_indices: tuple[int, ...] | None = None,
 ) -> bytes:
     payload = bytearray(struct.pack("<Bi", extension_version, slot_count))
     if slot_count <= 0:
         return bytes(payload)
 
     payload.extend(struct.pack("<i", 4))
+    if extension_version == 2:
+        if source_material_indices is None:
+            source_material_indices = (0,)
+        payload.extend(struct.pack("<i", source_material_indices[0]))
     payload.extend(fstring("Body"))
     payload.extend(fstring("/Game/Materials/M_Body.M_Body"))
     payload.extend(fstring("materials/body.json"))
@@ -121,6 +147,44 @@ def pbr_interfaces_payload(
     return bytes(payload)
 
 
+def uemodel_payload(*, source_materials: tuple[tuple[int, str], ...]) -> bytes:
+    lod_payload = fstring("LOD0") + struct.pack("<i", 0)
+    materials = bytearray(struct.pack("<Bi", 2, len(source_materials)))
+    for section_index, (source_index, material_path) in enumerate(source_materials):
+        materials.extend(struct.pack("<ii", section_index, source_index))
+        materials.extend(fstring(f"Section{section_index}"))
+        materials.extend(fstring(material_path))
+        materials.extend(fstring(""))
+        materials.extend(struct.pack("<i", 0))
+    return chunk("LODS", 1, lod_payload) + chunk("FMODEL_MATERIALS", len(source_materials), bytes(materials))
+
+
+def uemodel_bytes(*, source_materials: tuple[tuple[int, str], ...]) -> bytes:
+    header = b"".join((b"UEFORMAT", fstring("UEMODEL"), b"\x04", fstring(""), b"\x00"))
+    return header + uemodel_payload(source_materials=source_materials)
+
+
+def compressed_uemodel_bytes(
+    *,
+    source_materials: tuple[tuple[int, str], ...],
+    compression_type: str = "GZIP",
+    uncompressed_size: int | None = None,
+    compressed_size: int | None = None,
+    payload: bytes | None = None,
+) -> bytes:
+    uncompressed_payload = uemodel_payload(source_materials=source_materials)
+    compressed_payload = gzip.compress(uncompressed_payload) if payload is None else payload
+    header = b"".join((
+        b"UEFORMAT", fstring("UEMODEL"), b"\x04", fstring(""), b"\x01",
+        fstring(compression_type), struct.pack(
+            "<ii",
+            len(uncompressed_payload) if uncompressed_size is None else uncompressed_size,
+            len(compressed_payload) if compressed_size is None else compressed_size,
+        ),
+    ))
+    return header + compressed_payload
+
+
 class FModelMaterialLinksReaderTests(unittest.TestCase):
     def read_model(self, *sections: bytes):
         return classes.UEModel.from_archive(reader.FArchiveReader(b"".join(sections)))
@@ -160,6 +224,282 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
         self.assertEqual(resource.unreal_object_path, "/Game/Textures/T_Body_BC.T_Body_BC")
         self.assertEqual(resource.mime, "image/png")
         self.assertEqual(resource.data, b"PNG")
+
+    def test_reads_v2_source_material_indices_without_changing_section_indices(self):
+        payload = bytearray(struct.pack("<Bi", 2, 2))
+        for section_index, source_index, name, path in (
+            (0, 1, "First", "/Game/Materials/M_Source1.M_Source1"),
+            (1, 0, "Second", "/Game/Materials/M_Source0.M_Source0"),
+        ):
+            payload.extend(struct.pack("<ii", section_index, source_index))
+            payload.extend(fstring(name))
+            payload.extend(fstring(path))
+            payload.extend(fstring(""))
+            payload.extend(struct.pack("<i", 0))
+
+        model = self.read_model(chunk("FMODEL_MATERIALS", 2, bytes(payload)))
+
+        self.assertEqual(
+            [(slot.slot_index, slot.source_material_index, slot.unreal_material_path) for slot in model.material_links.slots],
+            [(0, 1, "/Game/Materials/M_Source1.M_Source1"), (1, 0, "/Game/Materials/M_Source0.M_Source0")],
+        )
+
+    def test_allows_repeated_v2_source_material_indices(self):
+        payload = bytearray(struct.pack("<Bi", 2, 2))
+        for section_index in range(2):
+            payload.extend(struct.pack("<ii", section_index, 1))
+            payload.extend(fstring("Slot"))
+            payload.extend(fstring("/Game/M"))
+            payload.extend(fstring(""))
+            payload.extend(struct.pack("<i", 0))
+        model = self.read_model(chunk("FMODEL_MATERIALS", 2, bytes(payload)))
+        self.assertEqual([slot.source_material_index for slot in model.material_links.slots], [1, 1])
+
+    def test_accepts_v2_absent_source_material_sentinel(self):
+        payload = bytearray(struct.pack("<Bi", 2, 1))
+        payload.extend(struct.pack("<ii", 0, -1))
+        payload.extend(fstring("Slot"))
+        payload.extend(fstring("/Game/M"))
+        payload.extend(fstring(""))
+        payload.extend(struct.pack("<i", 0))
+        model = self.read_model(chunk("FMODEL_MATERIALS", 1, bytes(payload)))
+        self.assertIsNone(model.material_links.slots[0].source_material_index)
+
+    def test_read_uemodel_source_lods_aggregates_repeated_normalized_material_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "model.uemodel"
+            fixture.write_bytes(uemodel_bytes(source_materials=(
+                (3, "/Game/Materials/M_Body"),
+                (3, "/Game/Materials/M_Body.M_Body"),
+            )))
+
+            preflight = logic.read_uemodel_source_lods(fixture)
+
+        self.assertEqual(preflight.source_lods, frozenset({0}))
+        self.assertEqual(preflight.material_slots, {3: "/Game/Materials/M_Body"})
+
+    def test_read_uemodel_source_lods_reads_both_compressed_header_sizes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "model.uemodel"
+            fixture.write_bytes(compressed_uemodel_bytes(source_materials=(
+                (3, "/Game/Materials/M_Body.M_Body"),
+                (1, "/Game/Materials/M_Head.M_Head"),
+            )))
+
+            preflight = logic.read_uemodel_source_lods(fixture)
+
+        self.assertEqual(preflight.source_lods, frozenset({0}))
+        self.assertEqual(preflight.material_slots, {
+            3: "/Game/Materials/M_Body",
+            1: "/Game/Materials/M_Head",
+        })
+
+    def test_zstd_compressed_uemodel_validates_in_preflight_and_normal_import(self):
+        uncompressed_payload = uemodel_payload(source_materials=((3, "/Game/Materials/M_Body.M_Body"),))
+        compressed_payload = b"zstd fixture payload"
+        data = compressed_uemodel_bytes(
+            source_materials=((3, "/Game/Materials/M_Body.M_Body"),),
+            compression_type="ZSTD",
+            payload=compressed_payload,
+        )
+
+        class Decompressor:
+            def __init__(self):
+                self.calls = []
+
+            def decompress(self, payload, max_output_size):
+                self.calls.append((payload, max_output_size))
+                if payload != compressed_payload:
+                    raise AssertionError("ZSTD decompressor received the wrong payload")
+                if max_output_size != len(uncompressed_payload):
+                    raise AssertionError("ZSTD decompressor received the wrong output size")
+                return uncompressed_payload
+
+        decompressor = Decompressor()
+        package = sys.modules["io_scene_ueformat"]
+        previous = getattr(package, "zstd_decompressor", None)
+        package.zstd_decompressor = decompressor
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                fixture = Path(directory) / "model.uemodel"
+                fixture.write_bytes(data)
+                preflight = logic.read_uemodel_source_lods(fixture)
+
+            importer = logic.UEFormatImport.__new__(logic.UEFormatImport)
+            importer.options = types.SimpleNamespace(scale_factor=1.0)
+            importer.material_options = None
+            imported_archives = []
+            importer.import_uemodel_data = lambda archive, name, material_options: imported_archives.append((archive, name))
+            importer.import_data_by_reader(reader.FArchiveReader(data))
+        finally:
+            if previous is None:
+                del package.zstd_decompressor
+            else:
+                package.zstd_decompressor = previous
+
+        self.assertEqual(preflight.source_lods, frozenset({0}))
+        self.assertEqual(preflight.material_slots, {3: "/Game/Materials/M_Body"})
+        self.assertEqual(len(imported_archives), 1)
+        self.assertEqual(len(decompressor.calls), 2)
+
+    def test_zstd_header_size_mismatches_reject_preflight_and_normal_import(self):
+        uncompressed_payload = uemodel_payload(source_materials=((3, "/Game/Materials/M_Body.M_Body"),))
+        compressed_payload = b"zstd fixture payload"
+
+        class Decompressor:
+            def decompress(self, payload, max_output_size):
+                return uncompressed_payload
+
+        package = sys.modules["io_scene_ueformat"]
+        previous = getattr(package, "zstd_decompressor", None)
+        package.zstd_decompressor = Decompressor()
+        try:
+            for label, sizes, message in (
+                ("compressed", {"compressed_size": 1}, "Compressed payload size does not match header"),
+                ("uncompressed", {"uncompressed_size": 1}, "Decompressed payload size does not match header"),
+            ):
+                with self.subTest(header=label):
+                    data = compressed_uemodel_bytes(
+                        source_materials=((3, "/Game/Materials/M_Body.M_Body"),),
+                        compression_type="ZSTD",
+                        payload=compressed_payload,
+                        **sizes,
+                    )
+                    with tempfile.TemporaryDirectory() as directory:
+                        fixture = Path(directory) / "model.uemodel"
+                        fixture.write_bytes(data)
+                        with self.assertRaisesRegex(ValueError, message):
+                            logic.read_uemodel_source_lods(fixture)
+                    with self.assertRaisesRegex(ValueError, message):
+                        logic.UEFormatImport.__new__(logic.UEFormatImport).import_data_by_reader(reader.FArchiveReader(data))
+        finally:
+            if previous is None:
+                del package.zstd_decompressor
+            else:
+                package.zstd_decompressor = previous
+
+    def test_rejects_compressed_payload_size_mismatch_before_parsing(self):
+        data = compressed_uemodel_bytes(
+            source_materials=((3, "/Game/Materials/M_Body.M_Body"),),
+            compressed_size=1,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "model.uemodel"
+            fixture.write_bytes(data)
+            with self.assertRaisesRegex(ValueError, "Compressed payload size does not match header"):
+                logic.read_uemodel_source_lods(fixture)
+        with self.assertRaisesRegex(ValueError, "Compressed payload size does not match header"):
+            logic.UEFormatImport.__new__(logic.UEFormatImport).import_data_by_reader(reader.FArchiveReader(data))
+
+    def test_rejects_uncompressed_payload_size_mismatch_before_parsing(self):
+        data = compressed_uemodel_bytes(
+            source_materials=((3, "/Game/Materials/M_Body.M_Body"),),
+            uncompressed_size=1,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "model.uemodel"
+            fixture.write_bytes(data)
+            with self.assertRaisesRegex(ValueError, "Decompressed payload size does not match header"):
+                logic.read_uemodel_source_lods(fixture)
+        with self.assertRaisesRegex(ValueError, "Decompressed payload size does not match header"):
+            logic.UEFormatImport.__new__(logic.UEFormatImport).import_data_by_reader(reader.FArchiveReader(data))
+
+    def test_rejects_truncated_compressed_payload_before_decompression(self):
+        original = compressed_uemodel_bytes(source_materials=((3, "/Game/Materials/M_Body.M_Body"),))
+        data = original[:-1]
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "model.uemodel"
+            fixture.write_bytes(data)
+            with self.assertRaisesRegex(ValueError, "Compressed payload size does not match header"):
+                logic.read_uemodel_source_lods(fixture)
+        with self.assertRaisesRegex(ValueError, "Compressed payload size does not match header"):
+            logic.UEFormatImport.__new__(logic.UEFormatImport).import_data_by_reader(reader.FArchiveReader(data))
+
+    def test_read_uemodel_source_lods_rejects_conflicting_repeated_material_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "model.uemodel"
+            fixture.write_bytes(uemodel_bytes(source_materials=(
+                (3, "/Game/Materials/M_Body"),
+                (3, "/Game/Materials/M_Head"),
+            )))
+
+            with self.assertRaisesRegex(logic.UEMODELSourceMaterialAmbiguityError, "source material index 3"):
+                logic.read_uemodel_source_lods(fixture)
+
+    def test_read_uemodel_source_lods_rejects_repeated_malformed_material_identities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "model.uemodel"
+            fixture.write_bytes(uemodel_bytes(source_materials=(
+                (3, "/Game//Materials/M_Body"),
+                (3, "/Game/Materials/"),
+            )))
+
+            with self.assertRaisesRegex(logic.UEMODELSourceMaterialAmbiguityError, "invalid identity"):
+                logic.read_uemodel_source_lods(fixture)
+
+    def test_read_uemodel_source_lods_rejects_malformed_and_valid_shared_source_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "model.uemodel"
+            fixture.write_bytes(uemodel_bytes(source_materials=(
+                (3, "/Game//Materials/M_Body"),
+                (3, "/Game/Materials/M_Body.M_Body"),
+            )))
+
+            with self.assertRaisesRegex(logic.UEMODELSourceMaterialAmbiguityError, "invalid identity"):
+                logic.read_uemodel_source_lods(fixture)
+
+    def test_read_uemodel_source_lods_omits_absent_source_material_sentinel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "model.uemodel"
+            fixture.write_bytes(uemodel_bytes(source_materials=((-1, "/Game/Materials/M_Body"),)))
+
+            preflight = logic.read_uemodel_source_lods(fixture)
+
+        self.assertEqual(preflight.material_slots, {})
+
+    def test_rejects_invalid_v2_source_material_indices(self):
+        for source_indices, message in (((-2,), "source_material_index"),):
+            payload = bytearray(struct.pack("<Bi", 2, 2 if len(source_indices) > 1 else 1))
+            for section_index, source_index in enumerate(source_indices):
+                payload.extend(struct.pack("<ii", section_index, source_index))
+                payload.extend(fstring("Slot"))
+                payload.extend(fstring("/Game/M"))
+                payload.extend(fstring(""))
+                payload.extend(struct.pack("<i", 0))
+            with self.subTest(source_indices=source_indices), self.assertRaisesRegex(ValueError, message):
+                self.read_model(chunk("FMODEL_MATERIALS", len(source_indices), bytes(payload)))
+
+    @unittest.skipUnless(shutil.which("dotnet"), "dotnet is required to generate the C# producer fixture")
+    def test_reads_deep_relative_uri_from_csharp_writer_fixture(self):
+        cue4parse = Path(__file__).parents[2] / "Fmodel_Edited_ueformat" / "CUE4Parse"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            fixture = Path(temporary_directory) / "deep-relative.uemodel"
+            environment = os.environ | {"FMODEL_DEEP_RELATIVE_FIXTURE_PATH": str(fixture)}
+            subprocess.run(
+                [
+                    "dotnet", "test", "CUE4Parse.Tests/CUE4Parse.Tests.csproj", "--no-restore",
+                    "--filter", "FullyQualifiedName~GoldenFixtureWriterTests.WritesDeterministicUeModelGoldenFixture",
+                ],
+                cwd=cue4parse,
+                env=environment,
+                check=True,
+            )
+
+            archive = reader.FArchiveReader(fixture.read_bytes())
+            archive.read_string(len(classes.MAGIC))
+            self.assertEqual(archive.read_fstring(), classes.MODEL_IDENTIFIER)
+            archive.file_version = classes.EUEFormatVersion(int.from_bytes(archive.read_byte(), byteorder="big"))
+            archive.read_fstring()
+            self.assertFalse(archive.read_bool())
+            archive.metadata["scale"] = 0.01
+            model = classes.UEModel.from_archive(archive)
+
+        texture = model.material_links.slots[0].parameters[0].texture
+        self.assertEqual(texture.location_mode, fmodel.RELATIVE_LOCATION_MODE)
+        self.assertEqual(texture.uri, "../../Textures/T_Deep.png")
 
     def test_keeps_unknown_top_level_chunks_skippable(self):
         model = self.read_model(
@@ -327,7 +667,7 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
 
     def test_rejects_unsupported_material_extension_version(self):
         with self.assertRaisesRegex(ValueError, "extension version"):
-            self.read_model(chunk("FMODEL_MATERIALS", 1, material_links_payload(extension_version=2)))
+            self.read_model(chunk("FMODEL_MATERIALS", 1, material_links_payload(extension_version=3)))
 
         with self.assertRaisesRegex(ValueError, "extension version"):
             self.read_model(chunk("FMODEL_TEXTURES", 1, textures_payload(version=2)))
@@ -474,10 +814,34 @@ class FModelResourceResolutionTests(unittest.TestCase):
         self.assertEqual(self.resolve(texture, ue_export_root=None), expected)
         self.assertEqual(self.resolve(texture, ue_export_root=""), expected)
 
+    def test_relative_uri_allows_leading_parents_when_resolved_inside_export_root(self):
+        model_path = Path("C:/exports/characters/hero/models/mesh.uemodel")
+        texture = classes.TextureResource(
+            id=1, unreal_object_path="", location_mode=1, uri="../../Textures/body.png"
+        )
+        resolver = fmodel.FModelResourceResolver(
+            model_path=model_path,
+            fmodel_textures={},
+            ue_export_root=Path("C:/exports"),
+            bundle_root=None,
+        )
+
+        self.assertEqual(
+            resolver.resolve_texture(texture),
+            Path("C:/exports/characters/Textures/body.png"),
+        )
+
+    def test_relative_uri_rejects_leading_parents_that_escape_export_root(self):
+        texture = classes.TextureResource(
+            id=1, unreal_object_path="", location_mode=1, uri="../../../../outside.png"
+        )
+
+        with self.assertRaisesRegex(ValueError, "escapes ue_export_root"):
+            self.resolve(texture)
+
     def test_file_uri_modes_reject_noncanonical_relative_paths(self):
         unsafe_uris = (
             "",
-            "../body.png",
             "./body.png",
             "textures//body.png",
             "textures/body.png/",
@@ -488,7 +852,8 @@ class FModelResourceResolutionTests(unittest.TestCase):
             "a\0b",
         )
         for mode in (1, 2):
-            for unsafe_uri in unsafe_uris:
+            mode_unsafe_uris = unsafe_uris if mode == 1 else ("../body.png", *unsafe_uris)
+            for unsafe_uri in mode_unsafe_uris:
                 with self.subTest(mode=mode, uri=unsafe_uri), self.assertRaisesRegex(ValueError, "URI"):
                     self.resolve(classes.TextureResource(id=1, unreal_object_path="", location_mode=mode, uri=unsafe_uri))
 
@@ -595,6 +960,22 @@ class FModelMetadataTests(unittest.TestCase):
 
 
 class FModelImageIdentityTests(unittest.TestCase):
+    def test_external_cache_key_uses_blender_compatible_windows_path(self):
+        texture = classes.TextureResource(
+            id=1,
+            unreal_object_path="/Game/Textures/T_Body.T_Body",
+            location_mode=1,
+            uri="textures/body.png",
+        )
+        resource = Path(r"C:\exports\textures\body.png")
+        with mock.patch.object(material_images, "_blender_file_path", return_value="short-body.png") as convert:
+            with mock.patch("builtins.open", mock.mock_open(read_data=b"texture")) as opened:
+                with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("raw Path.read_bytes used")):
+                    key = material_images._resource_cache_key(texture, resource, "COLOR")
+        convert.assert_called_once_with(resource)
+        opened.assert_called_once_with("short-body.png", "rb")
+        self.assertEqual(key[1], __import__("hashlib").sha256(b"texture").hexdigest())
+
     def test_cache_identity_uses_canonical_unreal_identity_content_and_interpretation(self):
         texture = classes.TextureResource(
             id=1,
