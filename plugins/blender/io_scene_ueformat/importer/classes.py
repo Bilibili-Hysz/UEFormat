@@ -311,6 +311,34 @@ class FModelTargetSkeletonIdentity(FModelSkeletonIdentity):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class FModelTargetPoseIdentity(FModelSkeletonIdentity):
+    source_pose_path: str
+
+    @classmethod
+    def from_archive(cls, ar: FArchiveReader) -> FModelTargetPoseIdentity:
+        version = int.from_bytes(ar.read_byte(), byteorder="big")
+        if version != 1:
+            raise ValueError(f"Unsupported FModel skeleton identity version: {version}")
+        source_pose_path = ar.read_bounded_fstring(
+            MAX_FMODEL_IDENTITY_PATH_BYTES,
+            "FModel target skeleton source_pose_path",
+        )
+        if not source_pose_path:
+            raise ValueError("Invalid FModel target skeleton source_pose_path")
+        skeleton_path = ar.read_bounded_fstring(MAX_FMODEL_IDENTITY_PATH_BYTES, "FModel skeleton identity skeleton_path")
+        if not skeleton_path:
+            raise ValueError("Invalid FModel skeleton identity skeleton_path")
+        has_guid = int.from_bytes(ar.read_byte(), byteorder="big")
+        if has_guid not in (0, 1):
+            raise ValueError(f"Invalid FModel skeleton identity has_skeleton_guid: {has_guid}")
+        guid = ar.read(16) if has_guid else None
+        layout_hash = ar.read(32)
+        if not ar.eof():
+            raise ValueError("Trailing FModel skeleton identity data")
+        return cls(version, skeleton_path, guid, layout_hash, source_pose_path)
+
+
 def _validate_top_level_count(count: int, array_size: int, name: str) -> None:
     if count != array_size:
         raise ValueError(
@@ -1041,24 +1069,45 @@ class FloatKey(AnimKey):
 class UEPose:
     poses: list[UEPoseData] = field(default_factory=list)
     curve_names: list[str] = field(default_factory=list)
+    target_skeleton_identity: FModelTargetPoseIdentity | None = None
     
     @classmethod
     def from_archive(cls, ar: FArchiveReader) -> UEPose:
         data = cls()
 
+        recognized_chunks: set[str] = set()
         while not ar.eof():
             section_name = ar.read_fstring()
             array_size = ar.read_int()
             byte_size = ar.read_int()
+
+            if array_size < 0:
+                raise ValueError(f"Invalid top-level array_size: {array_size}")
+            extension_name = {
+                "FMODEL_TARGET_SKELETON": "FModel target skeleton",
+            }.get(section_name, f"Top-level chunk {section_name}")
+            if byte_size < 0:
+                raise ValueError(f"{extension_name} chunk declared negative byte_size")
+            if byte_size > ar.remaining():
+                raise ValueError(f"{extension_name} chunk declared byte_size exceeds available data")
 
             match section_name:
                 case "POSES":
                     data.poses = ar.read_array(array_size, lambda ar: UEPoseData.from_archive(ar))
                 case "CURVES":
                     data.curve_names = ar.read_array(array_size, lambda ar: ar.read_fstring())
+                case "FMODEL_TARGET_SKELETON":
+                    if section_name in recognized_chunks:
+                        raise ValueError(f"Invalid duplicate {section_name} chunk")
+                    _validate_fmodel_identity_chunk_count(array_size, section_name)
+                    chunk = ar.chunk(byte_size)
+                    data.target_skeleton_identity = FModelTargetPoseIdentity.from_archive(chunk)
                 case _:
                     Log.warn(f"Unknown Pose Data: {section_name}")
                     ar.skip(byte_size)
+
+            if section_name == "FMODEL_TARGET_SKELETON":
+                recognized_chunks.add(section_name)
         
         return data
 

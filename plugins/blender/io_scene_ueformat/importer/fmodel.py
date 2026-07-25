@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Mapping
 
-from .classes import FModelMaterialLinks, FModelSkeletonIdentity, FModelTargetSkeletonIdentity, TextureResource
+from .classes import FModelMaterialLinks, FModelSkeletonIdentity, FModelTargetPoseIdentity, FModelTargetSkeletonIdentity, TextureResource
 
 
 RELATIVE_LOCATION_MODE = 1
@@ -163,6 +163,8 @@ def skeleton_identity_metadata(
     }
     if isinstance(identity, FModelTargetSkeletonIdentity):
         metadata["source_animation_path"] = identity.source_animation_path
+    elif isinstance(identity, FModelTargetPoseIdentity):
+        metadata["source_pose_path"] = identity.source_pose_path
     return metadata
 
 
@@ -183,6 +185,40 @@ def verify_fmodel_target_skeleton(
 
     if target_identity.get("bone_layout_hash") != armature_identity.get("bone_layout_hash"):
         raise ValueError("FModel target skeleton layout hash mismatch")
+
+
+def verify_fmodel_target_pose(
+    target_identity: dict[str, object],
+    armature_identity: dict[str, object],
+) -> None:
+    """Validate a UEPose target identity against the selected armature."""
+    _validate_identity_pair(target_identity, armature_identity, "pose")
+
+
+def pose_identity_issues(
+    target_identity: Mapping[str, object] | None,
+    armature_identity: Mapping[str, object] | None,
+) -> list[str]:
+    issues = _identity_issues(target_identity, "target", require_source_path=True, source_field="source_pose_path")
+    issues.extend(_identity_issues(armature_identity, "armature", require_source_path=False))
+    return issues
+
+
+def _validate_identity_pair(
+    target_identity: dict[str, object],
+    armature_identity: dict[str, object],
+    kind: str,
+) -> None:
+    target_path = str(target_identity.get("skeleton_path", "")).strip().replace("\\", "/")
+    armature_path = str(armature_identity.get("skeleton_path", "")).strip().replace("\\", "/")
+    if target_path != armature_path:
+        raise ValueError(f"FModel target {kind} skeleton path mismatch")
+    target_guid = target_identity.get("skeleton_guid") if target_identity.get("has_skeleton_guid") else None
+    armature_guid = armature_identity.get("skeleton_guid") if armature_identity.get("has_skeleton_guid") else None
+    if target_guid and armature_guid and target_guid != armature_guid:
+        raise ValueError(f"FModel target {kind} skeleton GUID mismatch")
+    if target_identity.get("bone_layout_hash") != armature_identity.get("bone_layout_hash"):
+        raise ValueError(f"FModel target {kind} skeleton layout hash mismatch")
 
 
 def plan_fmodel_animation_binding(
@@ -252,12 +288,13 @@ def _identity_issues(
     label: str,
     *,
     require_source_path: bool,
+    source_field: str = "source_animation_path",
 ) -> list[str]:
     if identity is None:
         return [f"FModel {label} skeleton identity is missing"]
     required = ("version", "skeleton_path", "has_skeleton_guid", "skeleton_guid", "bone_layout_hash")
     if require_source_path:
-        required += ("source_animation_path",)
+        required += (source_field,)
     if any(field not in identity for field in required):
         return [f"FModel {label} skeleton identity is malformed"]
     valid = (
@@ -274,8 +311,8 @@ def _identity_issues(
     if require_source_path:
         valid = (
             valid
-            and isinstance(identity["source_animation_path"], str)
-            and bool(identity["source_animation_path"].strip())
+            and isinstance(identity[source_field], str)
+            and bool(identity[source_field].strip())
         )
     return [] if valid else [f"FModel {label} skeleton identity is malformed"]
 

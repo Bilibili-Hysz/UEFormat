@@ -20,7 +20,9 @@ from .fmodel import (
     FModelResourceResolver,
     material_links_metadata,
     plan_fmodel_animation_binding,
+    pose_identity_issues,
     skeleton_identity_metadata,
+    verify_fmodel_target_pose,
 )
 from .material_builder import FModelMaterialImportOptions, build_fmodel_materials
 from .material_images import FModelImageRepository
@@ -827,8 +829,36 @@ class UEFormatImport:
 
         selected_armature = self.options.override_skeleton or get_active_armature()
         assert isinstance(selected_armature, bpy.types.Object)  # noqa: S101
+
+        target_identity = (
+            skeleton_identity_metadata(data.target_skeleton_identity)
+            if data.target_skeleton_identity is not None
+            else None
+        )
+        armature_identity = None
+        if "fmodel_skeleton_identity" in selected_armature:
+            try:
+                parsed_identity = json.loads(selected_armature["fmodel_skeleton_identity"])
+                armature_identity = parsed_identity if isinstance(parsed_identity, dict) else None
+            except (TypeError, ValueError):
+                armature_identity = None
+        if target_identity is not None:
+            issues = pose_identity_issues(target_identity, armature_identity)
+            if not issues:
+                try:
+                    verify_fmodel_target_pose(target_identity, armature_identity)
+                except ValueError as exc:
+                    issues.append(str(exc))
+            if issues and self.options.strict_fmodel_skeleton:
+                raise ValueError("; ".join(issues))
         
         selected_mesh = get_armature_mesh(selected_armature)
+        if target_identity is not None:
+            selected_mesh["fmodel_target_pose_identity"] = json.dumps(
+                target_identity,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
 
         original_shape_key_lock = selected_mesh.show_only_shape_key
         original_mode = bpy.context.active_object.mode

@@ -53,3 +53,4 @@ class UEAnimOptions(UEFormatOptions):
 class UEPoseOptions(UEFormatOptions):
     root_bone: str = ""
     override_skeleton: Armature | None = None
+    strict_fmodel_skeleton: bool = True
