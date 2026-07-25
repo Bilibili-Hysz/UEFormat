@@ -513,7 +513,7 @@ def _diag(e,p,s):
     if n>_MAX_DIAGNOSTICS: raise UESceneError("DIAG count exceeds limit")
     for i in range(n):
         v=struct.unpack_from("<BBHIQIIQII",p,8+i*40)
-        if v[-1] or v[0] not in (1,2,3) or v[1] not in range(7) or not 1<=v[2]<=10 or v[3]&~1 or (not v[3] and (v[7] or v[8])): raise UESceneError("invalid DIAG record")
+        if v[-1] or v[0] not in (1,2,3) or v[1] not in range(7) or not 1<=v[2]<=11 or v[3]&~1 or (not v[3] and (v[7] or v[8])): raise UESceneError("invalid DIAG record")
         _range(v[7],v[8],len(blob),"DIAG details"); details=blob[v[7]:v[7]+v[8]]
         if v[3] and (len(details)<8 or len(details)>_MAX_OPAQUE_BYTES+8 or struct.unpack_from("<HHI",details)!=(1,0,len(details)-8)): raise UESceneError("invalid DIAG details")
         out.append(Diagnostic(v[0],v[1],v[2],v[3],v[4],_source_path(s,v[5],False),_str(s,v[6],True),details))

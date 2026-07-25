@@ -614,7 +614,7 @@ def test_rejects_lods_when_asst_has_no_assets_before_decoding_records():
     with pytest.raises(_module().UESceneError, match="ASST count exceeds limit"):
         _module().UEScene.from_bytes(_scene(chunks={b"ASST": struct.pack("<II", 0, 1) + b"\0" * 104}))
 
-def test_accepts_supported_diagnostic_code_upper_bound_and_rejects_code_eleven():
+def test_accepts_supported_diagnostic_code_upper_bound_and_rejects_code_twelve():
     accepted = struct.pack("<BBHIQIIQII", 1, 0, 9, 0, 0, 0, 12, 0, 0, 0)
     scene = _module().UEScene.from_bytes(_scene(
         strs=_strings([b"uescene", b"models/cube.uemodel", b"Actor", b"Component", b"/Game/Cube", b"Cube", b"model/uemodel", b"ActorClass", b"/Game/Actor", b"ComponentClass", b"/Game/Component", b"diagnostic"]),
@@ -629,7 +629,14 @@ def test_accepts_supported_diagnostic_code_upper_bound_and_rejects_code_eleven()
     ))
     assert scene.diagnostics[0].code == 10
 
-    rejected = struct.pack("<BBHIQIIQII", 1, 0, 11, 0, 0, 0, 12, 0, 0, 0)
+    code_eleven = struct.pack("<BBHIQIIQII", 1, 0, 11, 0, 0, 0, 12, 0, 0, 0)
+    scene = _module().UEScene.from_bytes(_scene(
+        strs=_strings([b"uescene", b"models/cube.uemodel", b"Actor", b"Component", b"/Game/Cube", b"Cube", b"model/uemodel", b"ActorClass", b"/Game/Actor", b"ComponentClass", b"/Game/Component", b"diagnostic"]),
+        chunks={b"DIAG": struct.pack("<II", 1, 0) + code_eleven},
+    ))
+    assert scene.diagnostics[0].code == 11
+
+    rejected = struct.pack("<BBHIQIIQII", 1, 0, 12, 0, 0, 0, 12, 0, 0, 0)
     with pytest.raises(_module().UESceneError, match="invalid DIAG record"):
         _module().UEScene.from_bytes(_scene(
             strs=_strings([b"uescene", b"models/cube.uemodel", b"Actor", b"Component", b"/Game/Cube", b"Cube", b"model/uemodel", b"ActorClass", b"/Game/Actor", b"ComponentClass", b"/Game/Component", b"diagnostic"]),
