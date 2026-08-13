@@ -1,5 +1,8 @@
 # UEFormat Specifications
 
+> **FModel pipeline status:** This file documents shared UEFormat binary conventions. Cross-project routing, URI, material, Blender and release semantics are defined by [the unified pipeline specification](../../docs/current/UEFORMAT_BLENDER_PIPELINE_SPEC.md).
+
+
 Shared binary conventions used by `.uemodel`, `.ueanim`, and `.uepose`.
 
 All multi-byte integers and floats are **little-endian**. Integers are signed unless noted otherwise.
@@ -111,7 +114,8 @@ struct FStaticDataChunk
 
 Notes:
 
-- Chunk order is **not guaranteed**. Readers match on `HeaderName`.
+- Generic upstream chunk order is **not guaranteed**. Readers match on `HeaderName`.
+- Exception: when strict FModel skeleton checking is enabled and `FMODEL_TARGET_SKELETON` proves FModel provenance, Blender validates the frozen UEANIM/UEPOSE known-chunk order, required chunks and duplicates after length-bounded parsing. Files without that identity remain on the generic path.
 - Nested regions (LOD bodies, skeleton bodies) are sequences of chunks inside another chunk's `Data`.
 
 ---

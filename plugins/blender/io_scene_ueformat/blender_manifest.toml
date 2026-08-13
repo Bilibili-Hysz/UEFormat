@@ -1,13 +1,19 @@
-schema_version = "1.0.0"
+schema_version = "1.1.0"
 
 type = "add-on"
-license = ["SPDX:GPL-3.0-or-later"]
+license = ["SPDX:MIT"]
 
 id = "io_scene_ueformat"
-version = "1.0.0"
+version = "1.2.0"
 blender_version_min = "4.2.0"
-name = "UE Format (.uemodel / .ueanim)"
+name = "UE Format (.uemodel / .ueanim / .uepose)"
 tagline = "Importer for UEFormat Files"
 maintainer = "https://github.com/h4lfheart"
 
 tags = ["Import-Export"]
+
+wheels = [
+  "./wheels/zstandard-0.25.0-cp311-cp311-win_amd64.whl",
+  "./wheels/zstandard-0.25.0-cp312-cp312-win_amd64.whl",
+  "./wheels/zstandard-0.25.0-cp313-cp313-win_amd64.whl",
+]

@@ -124,13 +124,47 @@ def material_links_payload(
 def textures_payload(*, version: int = 1, count: int = 1) -> bytes:
     payload = bytearray(struct.pack("<Bi", version, count))
     if count <= 0:
+        payload.extend(struct.pack("<i", 0))
         return bytes(payload)
-    texture_bytes = b"PNG"
+    payload.extend(struct.pack("<i", 0))
+    return bytes(payload)
+
+
+def legacy_embedded_textures_payload(*, version: int = 1, count: int = 1, data: bytes = b"PNG") -> bytes:
+    payload = bytearray(struct.pack("<Bi", version, count))
+    if count <= 0:
+        return bytes(payload)
     payload.extend(struct.pack("<i", 7))
     payload.extend(fstring("/Game/Textures/T_Body_BC.T_Body_BC"))
     payload.extend(fstring("image/png"))
-    payload.extend(struct.pack("<i", len(texture_bytes)))
-    payload.extend(texture_bytes)
+    payload.extend(struct.pack("<i", len(data)))
+    payload.extend(data)
+    return bytes(payload)
+
+
+def identity_textures_payload(
+    *,
+    version: int = 1,
+    textures: tuple[tuple[str, str, int, int, bytes], ...] = (("tex.base", "textures/body_bc.png", 1, 3, b"\x11" * 32),),
+    bindings: tuple[tuple[str, int, str, int], ...] = (("/Game/Materials/M_Body.M_Body", 0, "tex.base", 1),),
+) -> bytes:
+    payload = bytearray(struct.pack("<Bi", version, len(textures)))
+    for texture_id, logical_resource_uri, is_embedded, byte_length, content_hash in textures:
+        payload.extend(struct.pack("<i", len(texture_id)))
+        payload.extend(texture_id.encode("utf-8"))
+        payload.extend(struct.pack("<i", len(logical_resource_uri)))
+        payload.extend(logical_resource_uri.encode("utf-8"))
+        payload.extend(struct.pack("<B", is_embedded))
+        payload.extend(struct.pack("<i", byte_length))
+        payload.extend(content_hash)
+    payload.extend(struct.pack("<i", len(bindings)))
+    for material_path, map_kind, texture_id, is_srgb in bindings:
+        payload.extend(struct.pack("<i", len(material_path)))
+        payload.extend(material_path.encode("utf-8"))
+        payload.extend(struct.pack("<B", map_kind))
+        payload.extend(struct.pack("<i", len(texture_id)))
+        payload.extend(texture_id.encode("utf-8"))
+        payload.extend(struct.pack("<B", is_srgb))
     return bytes(payload)
 
 
@@ -192,7 +226,7 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
     def test_reads_material_links_and_texture_resources(self):
         model = self.read_model(
             chunk("FMODEL_MATERIALS", 1, material_links_payload()),
-            chunk("FMODEL_TEXTURES", 1, textures_payload()),
+            chunk("FMODEL_TEXTURES", 1, legacy_embedded_textures_payload()),
         )
 
         self.assertEqual(len(model.material_links.slots), 1)
@@ -213,6 +247,7 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
         self.assertEqual(texture.color_space, 1)
         self.assertEqual(texture.packing, 0)
         self.assertEqual(texture.uv_set, 0)
+        self.assertIs(texture.texture.kind, classes.TextureResourceKind.PARAMETER)
         self.assertEqual(scalar.value, 0.25)
         self.assertEqual(len(vector.value), 4)
         for actual, expected in zip(vector.value, (0.1, 0.2, 0.3, 1.0), strict=True):
@@ -224,6 +259,7 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
         self.assertEqual(resource.unreal_object_path, "/Game/Textures/T_Body_BC.T_Body_BC")
         self.assertEqual(resource.mime, "image/png")
         self.assertEqual(resource.data, b"PNG")
+        self.assertIs(resource.kind, classes.TextureResourceKind.LEGACY_EMBEDDED)
 
     def test_reads_v2_source_material_indices_without_changing_section_indices(self):
         payload = bytearray(struct.pack("<Bi", 2, 2))
@@ -477,11 +513,16 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
         cue4parse = Path(__file__).parents[2] / "Fmodel_Edited_ueformat" / "CUE4Parse"
         with tempfile.TemporaryDirectory() as temporary_directory:
             fixture = Path(temporary_directory) / "deep-relative.uemodel"
-            environment = os.environ | {"FMODEL_DEEP_RELATIVE_FIXTURE_PATH": str(fixture)}
+            environment = os.environ | {
+                "FMODEL_DEEP_RELATIVE_FIXTURE_PATH": str(fixture),
+                "CUE4PARSE_SKIP_NATIVE": "1",
+            }
             subprocess.run(
                 [
-                    "dotnet", "test", "CUE4Parse.Tests/CUE4Parse.Tests.csproj", "--no-restore",
+                    "dotnet", "test", "CUE4Parse.Tests/CUE4Parse.Tests.csproj",
+                    "--artifacts-path", str(Path(temporary_directory) / "dotnet-artifacts"),
                     "--filter", "FullyQualifiedName~GoldenFixtureWriterTests.WritesDeterministicUeModelGoldenFixture",
+                    "--nologo", "--verbosity", "quiet",
                 ],
                 cwd=cue4parse,
                 env=environment,
@@ -567,7 +608,12 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
         for name, make_payload, count_name in payloads:
             for outer_count, inner_count in ((0, 1), (2, 1)):
                 with self.subTest(name=name, outer_count=outer_count, inner_count=inner_count):
-                    with self.assertRaisesRegex(ValueError, f"{count_name} count.*top-level"):
+                    expected = (
+                        "FMODEL_TEXTURES chunk array_size"
+                        if name == "FMODEL_TEXTURES"
+                        else f"{count_name} count.*top-level"
+                    )
+                    with self.assertRaisesRegex(ValueError, expected):
                         self.read_model(chunk(name, outer_count, make_payload(count=inner_count)))
 
     def test_v2_slot_index_uses_serialized_slot_ordinal(self):
@@ -647,30 +693,41 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
             self.read_model(materials, chunk("FMODEL_PBR_INTERFACES", 0, payload, byte_size=len(payload) + 1))
 
     def test_rejects_duplicate_recognized_singleton_chunks(self):
-        for name, payload in (
-            ("FMODEL_MATERIALS", material_links_payload(slot_count=0)),
-            ("FMODEL_TEXTURES", textures_payload(count=0)),
-            ("FMODEL_PBR_INTERFACES", pbr_interfaces_payload(records=())),
+        for name, payload, envelope_count in (
+            ("FMODEL_MATERIALS", material_links_payload(slot_count=0), 0),
+            ("FMODEL_TEXTURES", textures_payload(count=0), 1),
+            ("FMODEL_PBR_INTERFACES", pbr_interfaces_payload(records=()), 0),
         ):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "duplicate top-level chunk"):
-                self.read_model(chunk(name, 0, payload), chunk(name, 0, payload))
+                self.read_model(
+                    chunk(name, envelope_count, payload),
+                    chunk(name, envelope_count, payload),
+                )
 
     def test_rejects_duplicate_embedded_texture_ids_and_count_contradictions(self):
-        first = textures_payload()
-        second = textures_payload()
+        first = legacy_embedded_textures_payload()
+        second = legacy_embedded_textures_payload()
         duplicate_ids = first[:1] + struct.pack("<i", 2) + first[5:] + second[5:]
         with self.assertRaisesRegex(ValueError, "duplicate embedded texture id: 7"):
             self.read_model(chunk("FMODEL_TEXTURES", 2, duplicate_ids))
 
         with self.assertRaisesRegex(ValueError, "texture count cannot fit"):
-            self.read_model(chunk("FMODEL_TEXTURES", 1, textures_payload(count=1)[:5]))
+            self.read_model(chunk("FMODEL_TEXTURES", 1, legacy_embedded_textures_payload(count=1)[:5]))
 
     def test_rejects_unsupported_material_extension_version(self):
         with self.assertRaisesRegex(ValueError, "extension version"):
             self.read_model(chunk("FMODEL_MATERIALS", 1, material_links_payload(extension_version=3)))
 
         with self.assertRaisesRegex(ValueError, "extension version"):
-            self.read_model(chunk("FMODEL_TEXTURES", 1, textures_payload(version=2)))
+            self.read_model(chunk("FMODEL_TEXTURES", 1, textures_payload(version=3)))
+
+    def test_identity_v1_malformed_payload_does_not_silently_fallback_to_legacy_embedded_texture_reader(self):
+        malformed_new_payload = bytes((1,)) + struct.pack("<i", 1) + struct.pack("<i", len(b"tex.base")) + b"tex.base"
+
+        with mock.patch.object(classes.TextureResource, "_read_legacy_resources", side_effect=AssertionError("legacy fallback used")) as legacy_reader:
+            with self.assertRaises(ValueError):
+                self.read_model(chunk("FMODEL_TEXTURES", 1, malformed_new_payload))
+        legacy_reader.assert_not_called()
 
     def test_rejects_negative_extension_counts(self):
         with self.assertRaisesRegex(ValueError, "slot count"):
@@ -680,7 +737,7 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
             self.read_model(chunk("FMODEL_MATERIALS", 1, material_links_payload(parameter_count=-1)))
 
         with self.assertRaisesRegex(ValueError, "texture count"):
-            self.read_model(chunk("FMODEL_TEXTURES", 1, textures_payload(count=-1)))
+            self.read_model(chunk("FMODEL_TEXTURES", 1, legacy_embedded_textures_payload(count=-1)))
 
     def test_rejects_extension_counts_above_documented_maxima_before_record_reads(self):
         limit_cases = (
@@ -705,8 +762,9 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
         )
         for name, limit, count_name, make_payload in limit_cases:
             count = limit + 1
+            envelope_count = 1 if name == "FMODEL_TEXTURES" else count
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, f"{count_name} exceeds maximum"):
-                self.read_model(chunk(name, count, make_payload(count)))
+                self.read_model(chunk(name, envelope_count, make_payload(count)))
 
         parameter_count = classes.MAX_FMODEL_PARAMETERS + 1
         parameter_payload = (
@@ -738,11 +796,10 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
             self.read_model(chunk("FMODEL_MATERIALS", 1, material_links_payload(parameter_kind=99)))
 
     def test_rejects_truncated_texture_data(self):
-        payload = bytearray(textures_payload())
-        payload[-7:-3] = struct.pack("<i", 4)
+        payload = legacy_embedded_textures_payload(data=b"PNG")[:-1]
 
-        with self.assertRaisesRegex(ValueError, "Truncated FModel texture data"):
-            self.read_model(chunk("FMODEL_TEXTURES", 1, bytes(payload)))
+        with self.assertRaises(ValueError):
+            self.read_model(chunk("FMODEL_TEXTURES", 1, payload))
 
     def test_rejects_materials_chunk_declared_size_beyond_available_data(self):
         payload = material_links_payload(slot_count=0)
@@ -777,11 +834,11 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
         archive.chunk.assert_not_called()
 
     def test_rejects_trailing_garbage_in_recognized_chunks(self):
-        for name, payload in (
-            ("FMODEL_MATERIALS", material_links_payload() + b"junk"),
-            ("FMODEL_TEXTURES", textures_payload() + b"junk"),
+        for name, payload, message in (
+            ("FMODEL_MATERIALS", material_links_payload() + b"junk", "Trailing bytes"),
+            ("FMODEL_TEXTURES", identity_textures_payload() + b"junk", "Trailing FModel texture identity data"),
         ):
-            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Trailing bytes"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
                 self.read_model(chunk(name, 1, payload))
 
 
@@ -807,12 +864,51 @@ class FModelResourceResolutionTests(unittest.TestCase):
             Path("C:/exports/characters/hero/textures/body.png"),
         )
 
-    def test_relative_uri_resolves_without_export_root(self):
+    def test_relative_uri_without_export_root_is_confined_to_model_parent(self):
         texture = classes.TextureResource(id=1, unreal_object_path="", location_mode=1, uri="textures/body.png")
 
         expected = (self.model_path.parent / texture.uri).resolve(strict=False)
         self.assertEqual(self.resolve(texture, ue_export_root=None), expected)
         self.assertEqual(self.resolve(texture, ue_export_root=""), expected)
+
+    def test_owner_relative_leading_parents_infer_content_root(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            content_root = Path(temporary_directory) / "Output/Exports/CodeWorld/Content"
+            model_path = content_root / "Characters/Hero/Model/SM_Body.uemodel"
+            texture_path = content_root / "Characters/Hero/Texture/T_Body.png"
+            model_path.parent.mkdir(parents=True)
+            texture_path.parent.mkdir(parents=True)
+            resolver = fmodel.FModelResourceResolver(
+                model_path=model_path,
+                fmodel_textures={},
+                ue_export_root=None,
+                bundle_root=None,
+            )
+            texture = classes.TextureResource(
+                id=1,
+                unreal_object_path="",
+                location_mode=1,
+                uri="../Texture/T_Body.png",
+            )
+
+            self.assertEqual(resolver.resolve_texture(texture), texture_path.resolve(strict=False))
+
+    def test_owner_relative_leading_parents_without_known_root_fail_closed(self):
+        resolver = fmodel.FModelResourceResolver(
+            model_path=Path("C:/loose/models/mesh.uemodel"),
+            fmodel_textures={},
+            ue_export_root=None,
+            bundle_root=None,
+        )
+        texture = classes.TextureResource(
+            id=1,
+            unreal_object_path="",
+            location_mode=1,
+            uri="../textures/body.png",
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires ue_export_root|Content root"):
+            resolver.resolve_texture(texture)
 
     def test_relative_uri_allows_leading_parents_when_resolved_inside_export_root(self):
         model_path = Path("C:/exports/characters/hero/models/mesh.uemodel")
@@ -836,7 +932,7 @@ class FModelResourceResolutionTests(unittest.TestCase):
             id=1, unreal_object_path="", location_mode=1, uri="../../../../outside.png"
         )
 
-        with self.assertRaisesRegex(ValueError, "escapes ue_export_root"):
+        with self.assertRaisesRegex(ValueError, "escapes configured or inferred export root"):
             self.resolve(texture)
 
     def test_file_uri_modes_reject_noncanonical_relative_paths(self):
@@ -878,6 +974,18 @@ class FModelResourceResolutionTests(unittest.TestCase):
         self.assertEqual(self.resolve(texture, fmodel_textures={7: embedded}), b"PNG")
         with self.assertRaisesRegex(ValueError, "texture id 7"):
             self.resolve(texture)
+        with self.assertRaisesRegex(ValueError, "does not carry embedded bytes"):
+            self.resolve(
+                texture,
+                fmodel_textures={
+                    7: classes.TextureResource(
+                        id=7,
+                        unreal_object_path="",
+                        location_mode=1,
+                        uri="texture.png",
+                    )
+                },
+            )
 
     def test_embedded_uri_is_empty_or_canonical_relative_metadata(self):
         embedded = classes.TextureResource(id=7, unreal_object_path="", mime="image/png", data=b"PNG")
@@ -913,8 +1021,103 @@ class FModelResourceResolutionTests(unittest.TestCase):
                 bundle_root=None,
             )
             texture = classes.TextureResource(id=1, unreal_object_path="", location_mode=1, uri="textures/body.png")
-            with self.assertRaisesRegex(ValueError, "escapes ue_export_root"):
+            with self.assertRaisesRegex(ValueError, "escapes configured or inferred export root"):
                 resolver.resolve_texture(texture)
+
+    def test_export_root_identity_uri_verifies_size_and_sha256(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            export_root = Path(temporary_directory) / "Exports"
+            model_path = export_root / "Game/Models/SM_Body.uemodel"
+            texture_path = export_root / "Game/Textures/T_Body.png"
+            model_path.parent.mkdir(parents=True)
+            texture_path.parent.mkdir(parents=True)
+            contents = b"verified texture bytes"
+            texture_path.write_bytes(contents)
+            texture = classes.TextureResource(
+                id=0,
+                unreal_object_path="",
+                location_mode=fmodel.EXPORT_ROOT_LOCATION_MODE,
+                uri="Game/Textures/T_Body.png",
+                stable_id="tex.body",
+                expected_byte_length=len(contents),
+                expected_content_hash=__import__("hashlib").sha256(contents).digest(),
+            )
+            resolver = fmodel.FModelResourceResolver(
+                model_path=model_path,
+                fmodel_textures={},
+                ue_export_root=export_root,
+                bundle_root=None,
+            )
+
+            self.assertEqual(resolver.resolve_texture(texture), texture_path.resolve(strict=False))
+
+    def test_export_root_identity_uri_auto_discovers_export_root_from_model_ancestors(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            export_root = Path(temporary_directory) / "Output" / "Exports"
+            model_path = export_root / "CodeWorld/Content/Characters/Hero/Model/SM_Body.uemodel"
+            texture_path = export_root / "CodeWorld/Content/Characters/Hero/Textures/T_Body.png"
+            model_path.parent.mkdir(parents=True)
+            texture_path.parent.mkdir(parents=True)
+            contents = b"auto discovered"
+            texture_path.write_bytes(contents)
+            texture = classes.TextureResource(
+                id=0,
+                unreal_object_path="",
+                location_mode=fmodel.EXPORT_ROOT_LOCATION_MODE,
+                uri="CodeWorld/Content/Characters/Hero/Textures/T_Body.png",
+                stable_id="tex.body",
+                expected_byte_length=len(contents),
+                expected_content_hash=__import__("hashlib").sha256(contents).digest(),
+            )
+            resolver = fmodel.FModelResourceResolver(
+                model_path=model_path,
+                fmodel_textures={},
+                ue_export_root=None,
+                bundle_root=None,
+            )
+
+            self.assertEqual(resolver.resolve_texture(texture), texture_path.resolve(strict=False))
+
+    def test_export_root_identity_uri_rejects_size_hash_and_embedded_metadata_mismatches(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            export_root = Path(temporary_directory)
+            texture_path = export_root / "Game/Textures/T_Body.png"
+            texture_path.parent.mkdir(parents=True)
+            contents = b"texture"
+            texture_path.write_bytes(contents)
+            base = dict(
+                id=0,
+                unreal_object_path="",
+                location_mode=fmodel.EXPORT_ROOT_LOCATION_MODE,
+                uri="Game/Textures/T_Body.png",
+                stable_id="tex.body",
+            )
+            resolver = fmodel.FModelResourceResolver(
+                model_path=export_root / "Game/Models/SM_Body.uemodel",
+                fmodel_textures={},
+                ue_export_root=export_root,
+                bundle_root=None,
+            )
+
+            with self.assertRaisesRegex(ValueError, "byte length mismatch"):
+                resolver.resolve_texture(classes.TextureResource(
+                    **base,
+                    expected_byte_length=len(contents) + 1,
+                    expected_content_hash=__import__("hashlib").sha256(contents).digest(),
+                ))
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                resolver.resolve_texture(classes.TextureResource(
+                    **base,
+                    expected_byte_length=len(contents),
+                    expected_content_hash=b"\x00" * 32,
+                ))
+            with self.assertRaisesRegex(ValueError, "marked embedded"):
+                resolver.resolve_texture(classes.TextureResource(
+                    **base,
+                    expected_byte_length=len(contents),
+                    expected_content_hash=__import__("hashlib").sha256(contents).digest(),
+                    identity_embedded=True,
+                ))
 
     def test_rejects_unknown_location_mode(self):
         texture = classes.TextureResource(id=1, unreal_object_path="", location_mode=99)
@@ -996,6 +1199,15 @@ class FModelImageIdentityTests(unittest.TestCase):
         self.assertNotEqual(key, material_images._resource_cache_key(texture, b"same bytes", "DATA"))
         self.assertEqual(key[0], "/Game/Textures/T_Body.T_Body")
 
+    def test_identity_texture_cache_uses_stable_id_when_unreal_path_is_unavailable(self):
+        texture = classes.TextureResource(
+            id=0,
+            unreal_object_path="",
+            stable_id="tex.body.base",
+        )
+        key = material_images._resource_cache_key(texture, b"same bytes", "COLOR")
+        self.assertEqual(key[0], "tex.body.base")
+
     def test_external_cache_identity_hashes_verified_file_contents_not_path_spelling(self):
         import tempfile
 
@@ -1051,6 +1263,42 @@ class FModelImageIdentityTests(unittest.TestCase):
 
 
 class FModelMaterialBuilderPolicyTests(unittest.TestCase):
+    def test_v2_source_material_index_maps_link_slot_to_dense_lod_material(self):
+        lod_materials = [
+            classes.Material("LOD 0", "", 0, 1, 0),
+            classes.Material("LOD 1", "", 0, 1, 1),
+        ]
+        links = classes.FModelMaterialLinks(
+            slots=[classes.FModelMaterialSlot(0, "Section", "", "", 1, [])],
+        )
+
+        self.assertEqual(
+            material_builder.source_slot_mapping_for_lod_materials(lod_materials, links),
+            {0: 1},
+        )
+
+    def test_v1_link_slot_falls_back_to_dense_lod_material_index(self):
+        lod_materials = [classes.Material("LOD 0", "", 0, 1, 0)]
+        links = classes.FModelMaterialLinks(
+            slots=[classes.FModelMaterialSlot(0, "Section", "", "", None, [])],
+        )
+
+        self.assertEqual(
+            material_builder.source_slot_mapping_for_lod_materials(lod_materials, links),
+            {0: 0},
+        )
+
+    def test_repeated_v2_source_material_indices_can_share_one_blender_slot(self):
+        slots = [
+            classes.FModelMaterialSlot(0, "Section A", "", "", 1, []),
+            classes.FModelMaterialSlot(1, "Section B", "", "", 1, []),
+        ]
+
+        self.assertEqual(
+            material_builder._source_slot_to_blender_indices(slots, {0: 1, 1: 1}),
+            {0: 1, 1: 1},
+        )
+
     def test_source_slots_require_an_explicit_dense_blender_mapping(self):
         slots = [
             classes.FModelMaterialSlot(2, "Sparse", "", "", []),
@@ -1060,6 +1308,10 @@ class FModelMaterialBuilderPolicyTests(unittest.TestCase):
             material_builder._source_slot_to_blender_indices(slots, {2: 0}),
             {2: 0},
         )
+        self.assertEqual(
+            material_builder._source_slot_to_blender_indices(slots, {0: 0, 2: 1}),
+            {2: 1},
+        )
         with self.assertRaisesRegex(ValueError, "source slot 2 has no Blender material mapping"):
             material_builder._source_slot_to_blender_indices(slots, {})
         with self.assertRaisesRegex(ValueError, "duplicate Blender material index 0"):
@@ -1067,6 +1319,159 @@ class FModelMaterialBuilderPolicyTests(unittest.TestCase):
                 slots + [classes.FModelMaterialSlot(3, "Other", "", "", [])],
                 {2: 0, 3: 0},
             )
+
+    def test_identity_textures_obey_the_external_texture_loading_switch(self):
+        slot = classes.FModelMaterialSlot(
+            0,
+            "Body",
+            "/Game/Materials/M_Body.M_Body",
+            "materials/body.json",
+            parameters=[classes.FModelMaterialParameter(
+                name="FMODEL_TEXTURES.BaseColor",
+                kind=1,
+                semantic="base_color",
+                value=classes.TextureResource(
+                    id=0,
+                    unreal_object_path="",
+                    location_mode=fmodel.EXPORT_ROOT_LOCATION_MODE,
+                    uri="Game/Textures/T_Body.png",
+                    stable_id="tex.body",
+                    expected_byte_length=4,
+                    expected_content_hash=b"\x11" * 32,
+                ),
+            )],
+        )
+        images = types.SimpleNamespace(
+            resource_cache_key=lambda *_: self.fail("disabled external texture must not resolve"),
+        )
+        options = material_builder.FModelMaterialImportOptions(load_external=False)
+
+        identity = material_builder._material_cache_identity(slot, [], images, options)
+
+        self.assertIn('"parameters":[]', identity)
+        self.assertIn(fmodel.EXPORT_ROOT_LOCATION_MODE, material_builder._EXTERNAL_LOCATION_MODES)
+
+    def test_orm_material_path_separates_green_roughness_and_blue_metallic(self):
+        class Socket:
+            def __init__(self, name):
+                self.name = name
+
+        class Location:
+            def __init__(self, value=(0, 0)):
+                self.x, self.y = value
+
+        class Node:
+            def __init__(self, node_type):
+                self.type = "FRAME" if node_type == "NodeFrame" else node_type
+                self.bl_idname = node_type
+                self.label = ""
+                self.name = ""
+                self.image = None
+                self._location = Location()
+                self.parent = None
+                self.shrink = False
+                self.use_custom_color = False
+                self.color = (0.0, 0.0, 0.0)
+                self.inputs = {}
+                self.outputs = {}
+                if node_type == "ShaderNodeOutputMaterial":
+                    self.inputs = {"Surface": Socket("Surface")}
+                elif node_type == "ShaderNodeBsdfPrincipled":
+                    self.inputs = {
+                        "Base Color": Socket("Base Color"),
+                        "Normal": Socket("Normal"),
+                        "Emission Color": Socket("Emission Color"),
+                        "Roughness": Socket("Roughness"),
+                        "Metallic": Socket("Metallic"),
+                    }
+                    self.outputs = {"BSDF": Socket("BSDF")}
+                elif node_type == "ShaderNodeTexImage":
+                    self.inputs = {"Vector": Socket("Vector")}
+                    self.outputs = {"Color": Socket("Color")}
+                elif node_type == "ShaderNodeUVMap":
+                    self.outputs = {"UV": Socket("UV")}
+                    self.uv_map = ""
+                elif node_type == "ShaderNodeSeparateColor":
+                    self.inputs = {"Color": Socket("Color")}
+                    self.outputs = {
+                        "Red": Socket("Red"),
+                        "Green": Socket("Green"),
+                        "Blue": Socket("Blue"),
+                    }
+
+            @property
+            def location(self):
+                return self._location
+
+            @location.setter
+            def location(self, value):
+                self._location = Location(value)
+
+        class Nodes(list):
+            def clear(self):
+                super().clear()
+
+            def new(self, node_type):
+                node = Node(node_type)
+                self.append(node)
+                return node
+
+        class Links(list):
+            def new(self, source, target):
+                self.append((source.name, target.name))
+
+        nodes = Nodes()
+        links = Links()
+        material = types.SimpleNamespace(
+            use_nodes=False,
+            node_tree=types.SimpleNamespace(nodes=nodes, links=links),
+        )
+        mesh = types.SimpleNamespace(
+            uv_layers=types.SimpleNamespace(get=lambda name: object() if name == "UV0" else None),
+        )
+        slot = classes.FModelMaterialSlot(
+            0,
+            "Body",
+            "/Game/Materials/M_Body.M_Body",
+            "materials/body.json",
+            parameters=[classes.FModelMaterialParameter(
+                name="FMODEL_TEXTURES.Orm",
+                kind=1,
+                semantic="orm",
+                value=classes.TextureResource(
+                    id=0,
+                    unreal_object_path="",
+                    location_mode=fmodel.EXPORT_ROOT_LOCATION_MODE,
+                    uri="Game/Textures/T_Body_ORM.png",
+                    stable_id="tex.orm",
+                    expected_byte_length=4,
+                    expected_content_hash=b"\x11" * 32,
+                ),
+            )],
+        )
+        images = types.SimpleNamespace(get_image=lambda parameter, interpretation: object())
+
+        material_builder._build_material(
+            material,
+            mesh,
+            slot,
+            images,
+            self.fail,
+            material_builder.FModelMaterialImportOptions(),
+        )
+
+        self.assertIn(("Green", "Roughness"), links)
+        self.assertIn(("Blue", "Metallic"), links)
+        self.assertTrue(any(node.type == "ShaderNodeSeparateColor" for node in nodes))
+        frame = next(node for node in nodes if node.type == "FRAME")
+        texture = next(node for node in nodes if node.type == "ShaderNodeTexImage")
+        uv = next(node for node in nodes if node.type == "ShaderNodeUVMap")
+        separate = next(node for node in nodes if node.type == "ShaderNodeSeparateColor")
+        self.assertTrue(frame.shrink)
+        self.assertIs(texture.parent, frame)
+        self.assertIs(uv.parent, frame)
+        self.assertEqual((uv.location.x, texture.location.x, separate.location.x), (-260, 0, 260))
+        self.assertEqual(texture.location.y, uv.location.y)
 
     def test_v2_role_kind_compatibility_matches_builder_source_paths(self):
         for role in (1, 4):

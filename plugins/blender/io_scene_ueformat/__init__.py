@@ -5,8 +5,8 @@ from . import op
 bl_info = {
     "name": "UE Format (.uemodel / .ueanim / .uepose)",
     "author": "Half",
-    "version": (1, 0, 0),
-    "blender": (4, 0, 0),
+    "version": (1, 2, 0),
+    "blender": (4, 2, 0),
     "location": "View3D > Sidebar > UE Format",
     "category": "Import",
 }
@@ -15,11 +15,16 @@ bl_info = {
 global zstd_decompressor
 zstd_decompressor = zstd.ZstdDecompressor()
 
-def register() -> None:
+def register(*, headless: bool = False) -> None:
     global zstd_decompressor  # noqa: PLW0603
     zstd_decompressor = zstd.ZstdDecompressor()
 
-    op.register()
+    op.register(headless=headless)
+
+def register_headless() -> None:
+    """Register without canonical UEFormat panels or import-menu entries."""
+
+    register(headless=True)
 
 
 def unregister() -> None:

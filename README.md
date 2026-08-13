@@ -2,85 +2,130 @@
 
 # UEFormat — FModel / Blender Edition
 
-An edited UEFormat pipeline for moving Unreal Engine assets from FModel into
-Blender through validated `.uemodel`, `.ueanim`, and `.uescene` files.
+Canonical Blender reader for the FModel → UEFormat → Blender pipeline.
 
-This repository is a working fork of [h4lfheart/UEFormat](https://github.com/h4lfheart/UEFormat).
-It keeps the original exchange format and plugins while extending the workflow
-around FModel exports, Blender scene import, material links, and reproducible
-tests.
-
-[![Discord](https://discord.com/api/guilds/866821077769781249/widget.png?style=shield)](https://discord.gg/DZ5YFXdBA6)
 [![Blender](https://img.shields.io/badge/Blender-5.2+-blue?logo=blender&logoColor=white&color=orange)](https://www.blender.org/download/)
-[![Unreal](https://img.shields.io/badge/Unreal-5.8+-blue?logo=unreal-engine&logoColor=white&color=white)](https://www.unrealengine.com/en-US/download)
 [![Release](https://img.shields.io/github/release/hysz-01/UEFormat)](https://github.com/hysz-01/UEFormat/releases)
-[![Downloads](https://img.shields.io/github/downloads/hysz-01/UEFormat/total?color=green)](https://github.com/hysz-01/UEFormat/releases)
 
 </div>
 
-## Edited pipeline
+## Scope
+
+This fork keeps upstream UEFormat compatibility where possible and defines the
+canonical Blender behavior for the FModel workflow:
 
 ```text
-Unreal Engine archives
-        │
-        ▼
-FModel / CUE4Parse exporters
-        │  .uemodel · .ueanim · .uescene
-        ▼
-UEFormat validation and resource links
-        │
-        ▼
-Blender 5.2 importer
+FModel / CUE4Parse
+  -> .uemodel / .ueanim / .uepose
+  -> io_scene_ueformat
+  -> Blender geometry, materials, animation, pose, diagnostics
 ```
 
-The edited pipeline focuses on complete, inspectable imports instead of only
-single static meshes. It preserves source provenance and reports failures at
-the scene and resource boundary so exported data can be diagnosed and tested.
+**Addon version:** `1.2.0`
+**Minimum Blender version:** `4.2.0`
+**Current workflow target:** Blender 5.2
+**Canonical addon source:** `plugins/blender/io_scene_ueformat/`
 
-## Plugins
+The full cross-repository specification is maintained at
+[`../docs/current/UEFORMAT_BLENDER_PIPELINE_SPEC.md`](../docs/current/UEFORMAT_BLENDER_PIPELINE_SPEC.md).
+The frozen machine contract is
+[`../docs/current/ueformat-content-contract-v1.json`](../docs/current/ueformat-content-contract-v1.json).
 
-- [Blender importer](https://github.com/hysz-01/UEFormat/tree/fmodel/material-links-v1/plugins/blender)
-- [Unreal Engine plugin](https://github.com/hysz-01/UEFormat/tree/fmodel/material-links-v1/plugins/unreal)
+## Supported FModel profile
 
-## Edited capabilities
+| File | Import result | FModel additions |
+|---|---|---|
+| `.uemodel` | geometry, skeleton, LODs, materials, textures | material links, texture identity, PBR roles, skeleton identity |
+| `.ueanim` | Blender Action | target skeleton identity and source animation provenance |
+| `.uepose` | pose/shape-key mutation or pose result | target skeleton identity and source pose provenance |
 
-- UEScene actor, hierarchy, static-mesh, material, and light import into Blender.
-- Strict required-model validation with staged scene import and rollback on failure.
-- UEMODEL geometry, skeleton identity, source LOD selection, and material-slot mapping.
-- FModel material and texture URI resolution with explicit source-slot provenance.
-- Material parameter metadata retention and safe handling of sparse or renamed links.
-- Optional ISM/HISM flattening while retaining shared instanced geometry by default.
-- UEANIM timing and source tick semantics preserved for Blender animation import.
-- Operator, deployed-Blender, fixture, release-parity, and golden-data coverage.
+The documented FModel profile does **not** use PSK, PSA, GLTF, OBJ or material
+JSON parsing as hidden import fallbacks. FModel can still expose its official
+non-UEFormat exporters, but they are outside this addon's frozen V1 contract.
 
-## Supported Exporters
-- [FortnitePorting](https://github.com/h4lfheart/FortnitePorting)
-- [FModel](https://github.com/4sval/FModel)
-- [CUE4Parse](https://github.com/FabianFG/CUE4Parse)
+## Resource and material behavior
+
+- Standalone `.uemodel` resources resolve relative to the model owner when
+  `LocationMode.Relative` is declared.
+- URI resolution rejects absolute/scheme/drive paths, unsafe traversal, root
+  escapes and integrity mismatches.
+- External resources carry byte length and SHA-256 checks; embedded resources
+  are resolved only through declared texture IDs.
+- Material JSON sidecars are metadata only. The importer does not scan JSON or
+  guess texture names when FModel links are missing.
+- Node graphs preserve readable UV → texture → processor → Principled layouts,
+  PBR/custom frames, declared UV sets and FModel provenance metadata.
+
+## Import reports
+
+Each model, animation or pose operation records a stable result with kind,
+status, source file and an actionable error summary.
+
+## GUI and headless registration
+
+Normal Blender registration:
+
+```python
+import io_scene_ueformat
+io_scene_ueformat.register()
+```
+
+Vendor/headless registration without panels or import-menu entries:
+
+```python
+import io_scene_ueformat
+io_scene_ueformat.register_headless()
+# equivalent: io_scene_ueformat.register(headless=True)
+```
+
+Both paths use the same importer, reader, resource resolver and report contract.
+A vendor must not maintain a second protocol implementation.
+
+## Deployment parity
+
+The following runtime files are parity-critical between this source, the
+FModel Tools V2 vendor and a managed Blender installation:
+
+```text
+importer/classes.py
+importer/protocol.py
+importer/resources.py
+importer/materials.py
+importer/fmodel.py
+importer/material_images.py
+op/import_helpers.py
+```
+
+Use the workspace preflight/release tooling to verify source, ZIP and managed
+addon parity before distribution.
+
+## Format documentation
+
+- [Shared UEFormat binary conventions](docs/generic.md)
+- [UEModel wire details](docs/uemodel.md)
+- [UEAnim wire details](docs/ueanim.md)
+- [UEPose wire details](docs/uepose.md)
+- [Unified FModel → Blender specification](../docs/current/UEFORMAT_BLENDER_PIPELINE_SPEC.md)
+- [Frozen content contract](../docs/current/UEFORMAT_BLENDER_CONTENT_CONTRACT.md)
+- [URI contract](../docs/current/RELATIVE_RESOURCE_URI_CONTRACT.md)
 
 ## Testing
 
-The Python suite covers protocol readers, FModel material links, UEScene
-validation and staging, Blender operator behavior, fixture-based imports, and
-release source parity. From this repository root, run:
+Run the Blender addon's Python suite from this repository root:
 
 ```powershell
 pytest -q
 ```
 
-Blender deployment smoke tests are kept alongside the regular Python tests so
-the source addon and the managed Blender addon can be checked separately.
+The suite covers protocol readers, material/texture resolution, operator
+reports, fixtures and release/source parity. Automated
+coverage does not replace real package-backed export, independent parse or
+Blender GUI validation; those remain separate release gates.
 
-## Format Specification
-- [Generic](https://github.com/h4lfheart/UEFormat/tree/main/docs/generic.md)
-- [UEModel](https://github.com/h4lfheart/UEFormat/tree/main/docs/uemodel.md)
-- [UEAnim](https://github.com/h4lfheart/UEFormat/tree/main/docs/ueanim.md)
-- [UEPose](https://github.com/h4lfheart/UEFormat/tree/main/docs/uepose.md)
+## Upstream attribution
 
-## Upstream and scope
-
-The exchange format remains compatible with the upstream UEFormat project
-wherever possible. Changes in this fork are centered on the FModel-to-Blender
-workflow: scene-level import reliability, material and texture resource links,
-source identity, diagnostics, and verification. Upstream protocol and plugin
-work remains credited to the original maintainers.
+This repository remains a working fork of
+[h4lfheart/UEFormat](https://github.com/h4lfheart/UEFormat). Upstream format
+and plugin work remains credited to its maintainers. This edition adds the
+FModel-specific export/import contract, provenance, URI safety, scene
+transaction handling and parity verification.

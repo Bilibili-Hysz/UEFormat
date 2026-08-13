@@ -12,7 +12,8 @@ import bpy
 from .fmodel import FModelResourceResolver
 
 if TYPE_CHECKING:
-    from .classes import FModelMaterialParameter, TextureResource
+    from .materials import FModelMaterialParameter
+    from .resources import TextureResource
 
 
 def _canonical_unreal_identity(value: str) -> str:
@@ -31,11 +32,23 @@ def _resource_cache_key(
             contents = file.read()
     else:
         contents = resource
+    identity = _canonical_unreal_identity(texture.unreal_object_path) or texture.stable_id
     return (
-        _canonical_unreal_identity(texture.unreal_object_path),
+        identity,
         sha256(contents).hexdigest(),
         interpretation,
     )
+
+
+def _resource_descriptor(texture: TextureResource, resource: Path | bytes) -> tuple[object, ...]:
+    identity = _canonical_unreal_identity(texture.unreal_object_path) or texture.stable_id
+    if isinstance(resource, Path):
+        try:
+            stat = resource.stat()
+            return ("path", str(resource.resolve()), stat.st_size, stat.st_mtime_ns, identity)
+        except (OSError, RuntimeError):
+            return ("path", str(resource), identity)
+    return ("bytes", id(resource), len(resource), identity)
 
 
 def _blender_file_path(path: Path) -> str:
@@ -64,12 +77,29 @@ class FModelImageRepository:
         model_path: str | Path,
         ue_export_root: str | Path | None,
         bundle_root: str | Path | None,
+        creation_tracker=None,
     ) -> None:
         self.resolver = resolver
         self.model_path = Path(model_path)
         self.ue_export_root = Path(ue_export_root) if ue_export_root is not None else None
         self.bundle_root = Path(bundle_root) if bundle_root is not None else None
+        self.creation_tracker = creation_tracker
         self._images: dict[tuple[str, str, str], bpy.types.Image] = {}
+        self._resource_key_cache: dict[tuple[object, ...], tuple[str, str, str]] = {}
+
+    def _resource_cache_key_for(
+        self,
+        texture: FModelMaterialParameter,
+        resource: Path | bytes,
+        interpretation: str,
+    ) -> tuple[str, str, str]:
+        cache_token = (_resource_descriptor(texture, resource), interpretation)
+        cached = self._resource_key_cache.get(cache_token)
+        if cached is not None:
+            return cached
+        cache_key = _resource_cache_key(texture, resource, interpretation)
+        self._resource_key_cache[cache_token] = cache_key
+        return cache_key
 
     def resource_cache_key(
         self,
@@ -80,7 +110,7 @@ class FModelImageRepository:
         if interpretation not in {"COLOR", "DATA"}:
             raise ValueError(f"Unsupported FModel image color interpretation: {color_interpretation}")
         resource = self.resolver.resolve_texture(parameter.texture)
-        return _resource_cache_key(parameter.texture, resource, interpretation)
+        return self._resource_cache_key_for(parameter.texture, resource, interpretation)
 
     def get_image(self, parameter: FModelMaterialParameter, color_interpretation: str) -> bpy.types.Image:
         """Return a cached Blender image for an FModel texture parameter."""
@@ -90,7 +120,7 @@ class FModelImageRepository:
 
         texture = parameter.texture
         resource = self.resolver.resolve_texture(texture)
-        cache_key = _resource_cache_key(texture, resource, interpretation)
+        cache_key = self._resource_cache_key_for(texture, resource, interpretation)
         image = self._images.get(cache_key)
         if image is not None:
             return image
@@ -101,10 +131,14 @@ class FModelImageRepository:
             # cache may be mutated, regardless of global FModel provenance tags.
             if image not in self._images.values():
                 image = image.copy()
+                if self.creation_tracker is not None:
+                    self.creation_tracker.track("images", image)
             image["fmodel_source_type"] = "external"
             image["fmodel_source_path"] = str(resource)
         else:
             image = bpy.data.images.new(f"FModelEmbedded_{texture.id}", 8, 8)
+            if self.creation_tracker is not None:
+                self.creation_tracker.track("images", image)
             image.pack(data=resource, data_len=len(resource))
             image.source = "FILE"
             image.alpha_mode = "CHANNEL_PACKED"

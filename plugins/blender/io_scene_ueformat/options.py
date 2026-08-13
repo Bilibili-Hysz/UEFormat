@@ -32,7 +32,7 @@ class UEModelOptions(UEFormatOptions):
     import_morph_targets: bool = True
     import_virtual_bones: bool = False
     target_lod: int = 0
-    allowed_reorient_children: dict = None
+    allowed_reorient_children: dict[str, list[str]] | None = None
     import_fmodel_materials: bool = True
     build_fmodel_material_nodes: bool = True
     load_fmodel_embedded_textures: bool = True

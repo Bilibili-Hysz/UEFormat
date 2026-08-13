@@ -9,16 +9,18 @@ from typing import TYPE_CHECKING
 
 import bpy
 
-from .classes import FModelMaterialLinks
+from .materials import FModelMaterialLinks
 from .fmodel import material_links_metadata
 
 if TYPE_CHECKING:
-    from .classes import FModelMaterialLinks, FModelMaterialParameter, Material
+    from .classes import Material
+    from .materials import FModelMaterialLinks, FModelMaterialParameter
     from .material_images import FModelImageRepository
 
 
 _COLOR_SEMANTICS = {"base_color", "emissive"}
-_DATA_SEMANTICS = {"normal", "roughness", "metallic"}
+_DATA_SEMANTICS = {"normal", "roughness", "metallic", "orm"}
+_EXTERNAL_LOCATION_MODES = {1, 2, 4}
 # V2 wire roles have distinct source contracts. Color roles can be sampled or
 # supplied as vectors, Normal/AO are sampled textures, and value paths consume
 # scalar or vector parameters.
@@ -56,6 +58,8 @@ def build_fmodel_materials(
     warn: Callable[[str], None],
     options: FModelMaterialImportOptions | None = None,
     source_slot_to_blender_index: Mapping[int, int] | None = None,
+    creation_tracker=None,
+    material_cache=None,
 ) -> None:
     """Build materials using the explicit source-slot to Blender-index mapping."""
     options = options or FModelMaterialImportOptions()
@@ -92,7 +96,7 @@ def build_fmodel_materials(
         if not options.build_nodes:
             _attach_provenance(material, slot, interfaces)
             continue
-        existing = _find_matching_material(slot, interfaces, images, options)
+        existing = _find_matching_material(slot, interfaces, images, options, material_cache)
         if existing is not None:
             mesh.materials[material_index] = existing
             if material.get("fmodel_importer_owned") and material.users == 0:
@@ -100,7 +104,7 @@ def build_fmodel_materials(
             continue
         if not _prevalidate_material(mesh, slot, interfaces, images, warn, options):
             continue
-        material = _isolated_build_material(mesh, material_index, material)
+        material = _isolated_build_material(mesh, material_index, material, creation_tracker)
         material.name = f"{_material_display_name(slot)} (FModel)"
         _attach_provenance(material, slot, interfaces, options, images)
         if interfaces:
@@ -109,17 +113,27 @@ def build_fmodel_materials(
             )
         else:
             _build_material(material, mesh, slot, images, warn, options)
+        if material_cache is not None:
+            try:
+                material_cache[
+                    (_material_build_profile(options), _material_cache_identity(slot, interfaces, images, options))
+                ] = material
+            except (OSError, RuntimeError, ValueError):
+                pass
 
 
 def _source_slot_to_blender_indices(slots, mapping: Mapping[int, int]) -> dict[int, int]:
-    """Validate source identities before they are used as Blender array indices."""
-    slot_indices = {slot.slot_index for slot in slots}
-    unknown_slots = set(mapping) - slot_indices
-    if unknown_slots:
-        raise ValueError(f"Invalid FModel material mapping: unknown source slot {min(unknown_slots)}")
+    """Resolve links against the dense LOD mapping without rejecting unlinked LOD slots.
 
+    The standard ``MATERIALS`` array describes every LOD material slot, while the
+    optional ``FMODEL_MATERIALS`` chunk may contain only the slots for which a
+    material link was produced.  Therefore ``mapping`` is allowed to contain
+    source slots that are absent from ``slots``; those entries simply have no
+    FModel material-link work to perform.  Every serialized link still requires a
+    valid mapping and duplicate Blender indices remain invalid.
+    """
     resolved: dict[int, int] = {}
-    mapped_indices: dict[int, int] = {}
+    mapped_indices: dict[int, tuple[int, int | None]] = {}
     for slot in slots:
         source_slot = slot.slot_index
         if source_slot not in mapping:
@@ -130,14 +144,48 @@ def _source_slot_to_blender_indices(slots, mapping: Mapping[int, int]) -> dict[i
                 f"Invalid FModel material mapping: source slot {source_slot} has invalid "
                 f"Blender material index {blender_index!r}"
             )
-        if blender_index in mapped_indices:
-            raise ValueError(
-                f"Invalid FModel material mapping: source slot {source_slot} and source slot "
-                f"{mapped_indices[blender_index]} both map to duplicate Blender material index {blender_index}"
+        previous = mapped_indices.get(blender_index)
+        if previous is not None:
+            previous_slot, previous_source_material = previous
+            same_source_material = (
+                isinstance(slot.source_material_index, int)
+                and not isinstance(slot.source_material_index, bool)
+                and isinstance(previous_source_material, int)
+                and not isinstance(previous_source_material, bool)
+                and slot.source_material_index == previous_source_material
             )
-        mapped_indices[blender_index] = source_slot
+            if not same_source_material:
+                raise ValueError(
+                    f"Invalid FModel material mapping: source slot {source_slot} and source slot "
+                    f"{previous_slot} both map to duplicate Blender material index {blender_index}"
+                )
+        mapped_indices[blender_index] = (source_slot, slot.source_material_index)
         resolved[source_slot] = blender_index
     return resolved
+
+
+def source_slot_mapping_for_lod_materials(lod_materials, material_links) -> dict[int, int]:
+    """Map serialized material-link slots to dense Blender LOD material indices.
+
+    ``FModelMaterialSlot.slot_index`` identifies the exported section/link slot.
+    In extension v2, ``source_material_index`` identifies the original Unreal
+    material slot and must be used to locate the corresponding dense Blender
+    ``MATERIALS`` entry.  Falling back to ``slot_index`` preserves v1 and v2
+    records that do not carry an original source index.
+    """
+    dense_by_source = {
+        material.source_slot_index: blender_index
+        for blender_index, material in enumerate(lod_materials)
+        if material.source_slot_index is not None
+    }
+    mapping: dict[int, int] = {}
+    for slot in material_links.slots:
+        source_index = slot.source_material_index
+        if source_index is not None and source_index in dense_by_source:
+            mapping[slot.slot_index] = dense_by_source[source_index]
+        elif slot.slot_index in dense_by_source:
+            mapping[slot.slot_index] = dense_by_source[slot.slot_index]
+    return mapping
 
 
 def _material_link_metadata(slot, interfaces) -> dict[str, object]:
@@ -168,7 +216,7 @@ def _material_cache_identity(slot, interfaces, images, options=None) -> str:
             parameters.append((parameter.name, parameter.kind, parameter.semantic, parameter.value))
             continue
         mode = parameter.texture.location_mode
-        if (mode == 3 and not options.load_embedded) or (mode in {1, 2} and not options.load_external):
+        if (mode == 3 and not options.load_embedded) or (mode in _EXTERNAL_LOCATION_MODES and not options.load_external):
             continue
         roles = roles_by_parameter.get(index, [])
         interpretations = (
@@ -193,16 +241,28 @@ def _material_cache_identity(slot, interfaces, images, options=None) -> str:
     }, separators=(",", ":"), sort_keys=True)
 
 
-def _find_matching_material(slot, interfaces, images, options):
+def _find_matching_material(slot, interfaces, images, options, material_cache=None):
     try:
         expected_identity = _material_cache_identity(slot, interfaces, images, options)
     except (OSError, RuntimeError, ValueError):
         return None
     expected_profile = _material_build_profile(options)
+    cache_key = (expected_profile, expected_identity)
+    if material_cache is not None:
+        cached = material_cache.get(cache_key)
+        if cached is not None:
+            try:
+                getattr(cached, "name")
+            except (AttributeError, ReferenceError, RuntimeError):
+                material_cache.pop(cache_key, None)
+            else:
+                return cached
     for material in bpy.data.materials:
         if not material.get("fmodel_importer_owned") or material.get("fmodel_material_build_profile") != expected_profile:
             continue
         if material.get("fmodel_material_cache_identity") == expected_identity:
+            if material_cache is not None:
+                material_cache[cache_key] = material
             return material
     return None
 
@@ -222,10 +282,12 @@ def _attach_provenance(material, slot, interfaces, options=None, images=None) ->
     ])
 
 
-def _isolated_build_material(mesh, material_index, material):
+def _isolated_build_material(mesh, material_index, material, creation_tracker=None):
     """Only single-user importer-owned materials may be rebuilt in place."""
     if not material.get("fmodel_importer_owned") or material.users > 1:
         material = material.copy()
+        if creation_tracker is not None:
+            creation_tracker.track("materials", material)
         material.name = f"{material.name} (FModel)"
         mesh.materials[material_index] = material
     material["fmodel_importer_owned"] = True
@@ -251,14 +313,14 @@ def _prevalidate_material(mesh, slot, interfaces, images, warn, options) -> bool
         semantic = parameter.semantic.lower()
         if interfaces and roles and not invalid_roles and not options.keep_unmapped:
             continue
-        if not interfaces and semantic not in {"normal", "base_color", "emissive", "roughness", "metallic"} and not options.keep_unmapped:
+        if not interfaces and semantic not in {"normal", "base_color", "emissive", "roughness", "metallic", "orm"} and not options.keep_unmapped:
             continue
         if interfaces and not roles and not options.keep_unmapped:
             continue
         if parameter.texture.location_mode == 3 and not options.load_embedded:
             viable = True
             continue
-        if parameter.texture.location_mode in {1, 2} and not options.load_external:
+        if parameter.texture.location_mode in _EXTERNAL_LOCATION_MODES and not options.load_external:
             viable = True
             continue
         if mesh.uv_layers.get(f"UV{parameter.texture.uv_set}") is None:
@@ -302,16 +364,70 @@ def _v2_roles_by_parameter(slot, interfaces, warn=None):
 
 
 def _build_material(material, mesh, slot, images, warn, options) -> None:
+    """Build the V1/direct material graph with the legacy readable layout.
+
+    The UEFormat-only identity path can provide semantic texture bindings without
+    emitting ``FMODEL_PBR_INTERFACES``.  It must still receive the old node graph
+    organization: UV nodes on the left, texture sources in the middle, channel
+    processors before Principled, and unmapped sources in a separate frame.
+    Keeping this layout here prevents the identity-only path from silently falling
+    back to an unstructured pile of nodes.
+    """
     material.use_nodes = True
     nodes = material.node_tree.nodes
     links = material.node_tree.links
     nodes.clear()
+
     output = nodes.new("ShaderNodeOutputMaterial")
-    output.location = (620, 0)
+    output.location = (660, 0)
     principled = nodes.new("ShaderNodeBsdfPrincipled")
     principled.location = (360, 0)
     links.new(principled.outputs["BSDF"], output.inputs["Surface"])
+
+    pbr_frame = None
     unmapped_frame = None
+    uv_nodes = {}
+    pbr_y = 200
+    custom_y = 200
+    source_spacing = 260
+    pbr_semantics = {"normal", "base_color", "emissive", "roughness", "metallic", "orm"}
+
+    def frame_for(semantic: str):
+        nonlocal pbr_frame, unmapped_frame
+        if semantic in pbr_semantics:
+            if pbr_frame is None:
+                pbr_frame = nodes.new("NodeFrame")
+                pbr_frame.label = "FModel PBR Inputs"
+                pbr_frame.name = pbr_frame.label
+                pbr_frame.location = (-420, 0)
+                pbr_frame.shrink = False
+                pbr_frame.use_custom_color = True
+                pbr_frame.color = (0.18, 0.36, 0.22)
+            return pbr_frame
+        if unmapped_frame is None:
+            unmapped_frame = nodes.new("NodeFrame")
+            unmapped_frame.label = "FModel Unmapped Parameters"
+            unmapped_frame.name = unmapped_frame.label
+            unmapped_frame.location = (-1100, 0)
+            unmapped_frame.shrink = False
+            unmapped_frame.use_custom_color = True
+            unmapped_frame.color = (0.16, 0.24, 0.34)
+        return unmapped_frame
+
+    def link_uv(parameter, frame, y):
+        uv_name = f"UV{parameter.texture.uv_set}"
+        if mesh.uv_layers.get(uv_name) is None:
+            return False
+        key = (frame, uv_name)
+        uv_node = uv_nodes.get(key)
+        if uv_node is None:
+            uv_node = nodes.new("ShaderNodeUVMap")
+            uv_node.uv_map = uv_name
+            uv_node.label = uv_name
+            uv_node.parent = frame
+            uv_node.location = (-260, y)
+            uv_nodes[key] = uv_node
+        return uv_node
 
     for parameter in slot.parameters:
         if parameter.kind != 1:
@@ -321,31 +437,48 @@ def _build_material(material, mesh, slot, images, warn, options) -> None:
         if location_mode == 3 and not options.load_embedded:
             warn(f"FModel texture parameter {parameter.name!r} skipped: embedded textures disabled")
             continue
-        if location_mode in {1, 2} and not options.load_external:
+        if location_mode in _EXTERNAL_LOCATION_MODES and not options.load_external:
             warn(f"FModel texture parameter {parameter.name!r} skipped: external textures disabled")
             continue
-        if semantic not in {"normal", "base_color", "emissive", "roughness", "metallic"} and not options.keep_unmapped:
+        if semantic not in pbr_semantics and not options.keep_unmapped:
             continue
         image = _load_image(parameter, semantic, images, warn)
         if image is None:
             continue
-        if not _link_uv(mesh, parameter, None, nodes, links):
+
+        frame = frame_for(semantic)
+        source_y = pbr_y if frame == pbr_frame else custom_y
+        uv_node = link_uv(parameter, frame, source_y)
+        if uv_node is False:
             warn(
                 f"FModel texture parameter {parameter.name!r} declares UV{parameter.texture.uv_set}, "
                 "which is missing; skipping texture node to avoid implicit active-UV sampling"
             )
             continue
+
         texture = nodes.new("ShaderNodeTexImage")
         texture.label = parameter.name
         texture.name = parameter.name
         texture.image = image
-        texture.location = (-260, -220 * len(nodes))
-        _link_uv(mesh, parameter, texture, nodes, links)
+        texture.parent = frame
+        texture.location = (0, source_y)
+        links.new(uv_node.outputs["UV"], texture.inputs["Vector"])
+
         if semantic == "normal":
             normal_map = nodes.new("ShaderNodeNormalMap")
-            normal_map.location = (110, texture.location.y)
+            normal_map.parent = frame
+            normal_map.location = (260, source_y)
             links.new(texture.outputs["Color"], normal_map.inputs["Color"])
             links.new(normal_map.outputs["Normal"], principled.inputs["Normal"])
+        elif semantic == "orm":
+            separate = nodes.new("ShaderNodeSeparateColor")
+            separate.label = "ORM Channels (R=AO, G=Roughness, B=Metallic)"
+            separate.name = "ORM Channels"
+            separate.parent = frame
+            separate.location = (260, source_y)
+            links.new(texture.outputs["Color"], separate.inputs["Color"])
+            links.new(separate.outputs["Green"], principled.inputs["Roughness"])
+            links.new(separate.outputs["Blue"], principled.inputs["Metallic"])
         elif semantic in {"base_color", "emissive", "roughness", "metallic"}:
             target_socket = {
                 "base_color": "Base Color",
@@ -354,12 +487,18 @@ def _build_material(material, mesh, slot, images, warn, options) -> None:
                 "metallic": "Metallic",
             }[semantic]
             links.new(texture.outputs["Color"], principled.inputs[target_socket])
+
+        if frame == pbr_frame:
+            pbr_y -= source_spacing
         else:
-            if unmapped_frame is None:
-                unmapped_frame = nodes.new("NodeFrame")
-                unmapped_frame.label = "FModel Unmapped Parameters"
-                unmapped_frame.name = unmapped_frame.label
-            texture.parent = unmapped_frame
+            custom_y -= source_spacing
+
+    # Re-enable frame auto-sizing only after all absolute/local node positions have
+    # been assigned. Setting shrink=True before parenting is what caused older
+    # Blender builds to collapse the recovered layout into overlapping nodes.
+    for frame in (pbr_frame, unmapped_frame):
+        if frame is not None:
+            frame.shrink = True
 
 
 def _load_image(parameter: FModelMaterialParameter, semantic: str, images: FModelImageRepository, warn):
@@ -395,14 +534,14 @@ def _build_v2_material(material, mesh, slot, interfaces, images, warn, options) 
     custom_frame.label = "Custom / Unmapped (Preserved)"
     custom_frame.name = custom_frame.label
     custom_frame.location = (-1100, 0)
-    custom_frame.shrink = True
+    custom_frame.shrink = False
     custom_frame.use_custom_color = True
     custom_frame.color = (0.16, 0.24, 0.34)
     pbr_frame = nodes.new("NodeFrame")
     pbr_frame.label = "PBR Inputs"
     pbr_frame.name = pbr_frame.label
     pbr_frame.location = (-420, 0)
-    pbr_frame.shrink = True
+    pbr_frame.shrink = False
     pbr_frame.use_custom_color = True
     pbr_frame.color = (0.18, 0.36, 0.22)
 
@@ -440,7 +579,7 @@ def _build_v2_material(material, mesh, slot, interfaces, images, warn, options) 
             if location_mode == 3 and not options.load_embedded:
                 warn(f"FModel texture parameter {parameter.name!r} skipped: embedded textures disabled")
                 continue
-            if location_mode in {1, 2} and not options.load_external:
+            if location_mode in _EXTERNAL_LOCATION_MODES and not options.load_external:
                 warn(f"FModel texture parameter {parameter.name!r} skipped: external textures disabled")
                 continue
             uv_name = f"UV{parameter.texture.uv_set}"
@@ -621,3 +760,8 @@ def _build_v2_material(material, mesh, slot, interfaces, images, warn, options) 
             roughness = _socket_by_identifier(midpoint.outputs, "Value")
     if roughness is not None:
         links.new(roughness, _socket_by_identifier(principled.inputs, "Roughness"))
+
+    # Keep the old readable frame layout while avoiding Blender's early frame
+    # auto-shrink pass changing child coordinates during graph construction.
+    custom_frame.shrink = True
+    pbr_frame.shrink = True

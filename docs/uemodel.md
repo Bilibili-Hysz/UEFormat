@@ -1,5 +1,8 @@
 # UEModel Specifications
 
+> **FModel pipeline profile:** `.uemodel` is the canonical model artifact for StaticMesh, SkeletalMesh and skeleton-only exports. Its material/texture resource semantics are frozen by [the unified pipeline specification](../../docs/current/UEFORMAT_BLENDER_PIPELINE_SPEC.md) and [the URI contract](../../docs/current/RELATIVE_RESOURCE_URI_CONTRACT.md). Material JSON is never an importer fallback.
+
+
 Binary layout for `.uemodel` files (`Identifier = "UEMODEL"`).
 
 ---
@@ -12,7 +15,7 @@ Binary layout for `.uemodel` files (`Identifier = "UEMODEL"`).
 | `SKELETON` | `1` | Nested skeleton [FDataChunk](generic.md#fdatachunk)s |
 | `COLLISION` | convex count | [FConvexMeshCollision](#structures) x `Count` |
 | `FMODEL_MATERIALS` | material-link slot count | Optional FModel material extension v1 or v2; ignored by upstream readers as an unknown top-level chunk |
-| `FMODEL_TEXTURES` | embedded texture count | Optional FModel embedded-resource extension v1; ignored by upstream readers as an unknown top-level chunk |
+| `FMODEL_TEXTURES` | `1` (identity v1/v2 singleton) or legacy embedded-resource count | Optional FModel texture extension. Identity v1/v2 stores its own `texture_count` and `binding_count` inside the payload; legacy embedded v1 uses the envelope count as its resource count. Ignored by upstream readers as an unknown top-level chunk |
 | `FMODEL_SKELETON_IDENTITY` | `1` | Optional FModel skeleton identity extension v1; ignored by upstream readers as an unknown top-level chunk |
 
 ### `FMODEL_SKELETON_IDENTITY`

@@ -8,33 +8,6 @@ from ..typing import UFormatContext, UFSettings
 
 class UEFORMAT_PT_Layout:  # noqa: N801
     @staticmethod
-    def draw_scene_options(
-        obj: Panel | Operator,
-        settings: UFSettings,
-        *,
-        import_menu: bool = False,
-    ) -> None:
-        box = obj.layout.box()
-        box.label(text="Scene Import", icon="SCENE_DATA")
-        box.row().prop(settings, "flatten_uescene_hierarchy")
-        box.row().prop(settings, "flatten_uescene_instances")
-        box.row().prop(settings, "strict_uescene_models")
-        if import_menu:
-            return
-
-        box.row().operator("uf.import_uescene", text="Import UE Scene", icon="SCENE_DATA")
-        box.label(text="Uses model and material settings below.")
-        report = obj.layout.box()
-        report.label(text="Import Report", icon="TEXT")
-        if settings.last_import_summary:
-            report.label(text=settings.last_import_summary)
-        else:
-            report.label(text="No imports in this scene.")
-        row = report.row()
-        row.enabled = bool(settings.last_import_report)
-        row.operator("uf.copy_last_import_report", text="Copy Last Import Report", icon="COPYDOWN")
-
-    @staticmethod
     def draw_general_options(obj: Panel | Operator, settings: UFSettings) -> None:
         box = obj.layout.box()
         box.label(text="General", icon="SETTINGS")
@@ -112,21 +85,6 @@ class UEFORMAT_PT_Layout:  # noqa: N801
 
         if not import_menu:
             box.row().operator("uf.import_uepose", text="Import UE Pose", icon="ARMATURE_DATA")
-
-
-class UEFORMAT_PT_Scene(Panel):  # noqa: N801
-    bl_category = "UE Format"
-    bl_label = "UE Format: Scene"
-    bl_order = 0
-    bl_region_type = "UI"
-    bl_space_type = "VIEW_3D"
-
-    def draw(self, context: Context | UFormatContext) -> None:
-        assert hasattr(context.scene, "uf_settings")  # noqa: S101
-
-        context = cast(UFormatContext, context)
-        UEFORMAT_PT_Layout.draw_scene_options(self, context.scene.uf_settings)
-        UEFORMAT_PT_Layout.draw_general_options(self, context.scene.uf_settings)
 
 
 class UEFORMAT_PT_Model(Panel):  # noqa: N801

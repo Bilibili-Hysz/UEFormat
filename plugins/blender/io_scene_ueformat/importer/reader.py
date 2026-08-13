@@ -7,7 +7,7 @@ import numpy.typing as npt
 from typing import TYPE_CHECKING, BinaryIO, Literal, TypeVar, overload
 
 from ..importer.utils import bytes_to_str
-from ..importer.classes import EUEFormatVersion
+from .protocol import EUEFormatVersion
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -90,7 +90,14 @@ class FArchiveReader:
     def read_short(self) -> int:
         return struct.unpack("h", self._read_exact(2, "Short"))[0]
 
+    def read_ushort(self) -> int:
+        return struct.unpack("<H", self._read_exact(2, "Unsigned short"))[0]
+
+    def read_uint8(self) -> int:
+        return struct.unpack("B", self._read_exact(1, "Unsigned byte"))[0]
+
     def read_byte(self) -> bytes:
+        """Return one byte for compatibility with the upstream reader API."""
         return struct.unpack("c", self._read_exact(1, "Byte"))[0]
 
     def read_float(self) -> float:

@@ -45,6 +45,47 @@ class FModelPoseSkeletonIdentityReaderTests(unittest.TestCase):
 
         self.assertIsNone(pose.target_skeleton_identity)
 
+    def test_standard_pose_chunks_are_bounded_by_declared_byte_size(self):
+        for section_name in ("POSES", "CURVES"):
+            with self.subTest(section_name=section_name), self.assertRaisesRegex(ValueError, "Trailing bytes"):
+                classes.UEPose.from_archive(pose_archive(chunk(section_name, 0, b"junk")))
+
+    def test_strict_fmodel_pose_profile_accepts_canonical_chunks(self):
+        payload = (
+            chunk("POSES", 0, b"")
+            + chunk("CURVES", 0, b"")
+            + chunk("FMODEL_TARGET_SKELETON", 1, target_pose_identity_payload())
+        )
+        pose = classes.UEPose.from_archive(
+            pose_archive(payload),
+            strict_fmodel_profile=True,
+        )
+        self.assertIsNotNone(pose.target_skeleton_identity)
+
+    def test_strict_fmodel_pose_profile_rejects_missing_duplicate_and_order_drift(self):
+        poses = chunk("POSES", 0, b"")
+        curves = chunk("CURVES", 0, b"")
+        target = chunk("FMODEL_TARGET_SKELETON", 1, target_pose_identity_payload())
+        cases = (
+            (poses + target, "missing required chunk: CURVES"),
+            (poses + poses + curves + target, "duplicate known chunk: POSES"),
+            (curves + poses + target, "chunk order"),
+        )
+        for payload, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                classes.UEPose.from_archive(
+                    pose_archive(payload),
+                    strict_fmodel_profile=True,
+                )
+
+    def test_strict_pose_option_requires_fmodel_target_identity(self):
+        payload = chunk("POSES", 0, b"") + chunk("CURVES", 0, b"")
+        with self.assertRaisesRegex(ValueError, "missing required chunk: FMODEL_TARGET_SKELETON"):
+            classes.UEPose.from_archive(
+                pose_archive(payload),
+                strict_fmodel_profile=True,
+            )
+
     def test_rejects_duplicate_and_non_singleton_target_chunks(self):
         target = chunk("FMODEL_TARGET_SKELETON", 1, target_pose_identity_payload())
 

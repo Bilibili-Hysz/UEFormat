@@ -1,5 +1,8 @@
 # UEPose Specifications
 
+> **FModel pipeline profile:** `.uepose` is emitted for `UPoseAsset` through Save Animation and bulk animation export. `FMODEL_TARGET_SKELETON` stores Unreal object identity and provenance, not a filesystem resource URI. See [the unified pipeline specification](../../docs/current/UEFORMAT_BLENDER_PIPELINE_SPEC.md).
+
+
 Binary layout for `.uepose` files (`Identifier = "UEPOSE"`).
 
 ---
@@ -11,6 +14,8 @@ Binary layout for `.uepose` files (`Identifier = "UEPOSE"`).
 | `POSES` | pose count | [FPoseData](#structures) x `Count` |
 | `CURVES` | curve name count | `FString` x `Count` |
 | `FMODEL_TARGET_SKELETON` | `1` | Optional FModel target-skeleton identity extension v1; ignored by upstream readers as an unknown top-level chunk |
+
+When Blender's strict FModel skeleton option is enabled **and** this identity chunk is present, the file is treated as the frozen FModel profile. The known chunks must be `POSES`, `CURVES`, then `FMODEL_TARGET_SKELETON`; missing required chunks, duplicate known chunks, order drift and trailing chunk bytes fail closed. A file without the identity chunk remains a generic upstream UEPOSE import.
 
 ### `FMODEL_TARGET_SKELETON`
 
