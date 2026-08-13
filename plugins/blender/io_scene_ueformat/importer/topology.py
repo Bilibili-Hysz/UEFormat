@@ -109,3 +109,4 @@ def validate_uemodel_topology(
             if weight.bone_index < 0 or weight.bone_index >= len(skeleton.bones):
                 raise ValueError("Weight bone_index must be within [0, BoneCount)")
     return UEMODELTopologySummary(tuple(lod_summaries), skeleton_summary)
+

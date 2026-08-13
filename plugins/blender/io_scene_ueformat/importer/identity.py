@@ -148,3 +148,5 @@ def compute_skeleton_layout_hash(bones: Sequence[tuple[str, int] | _BoneLike]) -
         buffer.extend(name_bytes)
         buffer.extend(struct.pack("<i", parent_index))
     return hashlib.sha256(buffer).digest()
+
+
