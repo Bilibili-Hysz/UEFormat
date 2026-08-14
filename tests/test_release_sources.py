@@ -34,22 +34,10 @@ class ReleaseSourceTests(unittest.TestCase):
             canonical.write_text("canonical protocol source", encoding="utf-8")
             aggregate.write_text("canonical protocol source", encoding="utf-8")
 
-        canonical_root = workspace / helper.CANONICAL_ROOT
-        (canonical_root / ".github" / "workflows").mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(
-            WORKSPACE / helper.CANONICAL_ROOT / "release_preflight.py",
-            canonical_root / "release_preflight.py",
-        )
-        shutil.copyfile(
-            WORKSPACE / helper.CANONICAL_ROOT / ".github" / "workflows" / "main.yml",
-            canonical_root / ".github" / "workflows" / "main.yml",
-        )
-        fmodel_project = canonical_root / "FModel" / "FModel.csproj"
-        fmodel_project.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(WORKSPACE / helper.CANONICAL_ROOT / "FModel" / "FModel.csproj", fmodel_project)
-        manifest_writer = canonical_root / "FModel" / "Framework" / "UEFormatExportManifestWriter.cs"
-        manifest_writer.parent.mkdir(parents=True, exist_ok=True)
-        manifest_writer.write_text("canonical manifest writer", encoding="utf-8")
+        # The current release helper validates the six composed protocol seam
+        # files and treats the old checkout-local release_preflight.py as
+        # optional. The temporary workspace therefore needs only the current
+        # protocol sources and published addon archives.
 
         shutil.copytree(WORKSPACE / helper.ADDON_ROOT, workspace / helper.ADDON_ROOT)
         for archive_relative in helper.ADDON_ARCHIVES:
@@ -71,7 +59,12 @@ class ReleaseSourceTests(unittest.TestCase):
         parity = helper.validate_protocol_parity(WORKSPACE)
 
         self.assertEqual(set(parity), {
-            "CUE4Parse/CUE4Parse-Conversion/Materials/MaterialExporter2.cs",
+            "CUE4Parse/CUE4Parse-Conversion/ExportSession.cs",
+            "CUE4Parse/CUE4Parse-Conversion/Exporters/IExportSessionExtension.cs",
+            "CUE4Parse/CUE4Parse-Conversion/Formats/Animations/UEFormatAnimFormat.cs",
+            "CUE4Parse/CUE4Parse-Conversion/Formats/PoseAsset/UEFormatPoseFormat.cs",
+            "CUE4Parse/CUE4Parse-Conversion/Writers/UEFormat/FModelSkeletonIdentity.cs",
+            "CUE4Parse/CUE4Parse-Conversion/Writers/UEFormat/FModelSkeletonExtensionWriter.cs",
         })
         for hashes in parity.values():
             self.assertIn("canonical", hashes)
@@ -96,21 +89,29 @@ class ReleaseSourceTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("Protocol source mismatch", stderr.getvalue())
 
-    def test_missing_fmodel_manifest_writer_makes_preflight_nonzero(self):
+    def test_missing_canonical_protocol_source_makes_preflight_nonzero(self):
         helper = load_helper()
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             self.make_release_workspace(helper, workspace)
-            writer = workspace / helper.CANONICAL_ROOT / "FModel" / "Framework" / "UEFormatExportManifestWriter.cs"
-            writer.unlink()
+            missing = workspace / helper.CANONICAL_ROOT / helper.PROTOCOL_FILES[0]
+            missing.unlink()
 
             stderr = io.StringIO()
-            with mock.patch("sys.stderr", stderr):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "UEFORMAT_MANAGED_ADDON_ROOT": "",
+                    "APPDATA": "",
+                    "FMODEL_TOOLS_V2_ROOT": str(workspace / "missing-v2"),
+                },
+                clear=False,
+            ), mock.patch("sys.stderr", stderr):
                 result = helper.run_preflight(workspace)
 
         self.assertEqual(result, 1)
-        self.assertIn("required release sources are missing", stderr.getvalue())
-        self.assertIn("UEFormatExportManifestWriter.cs", stderr.getvalue())
+        self.assertIn("Missing canonical protocol source", stderr.getvalue())
+        self.assertIn(helper.PROTOCOL_FILES[0].as_posix(), stderr.getvalue())
 
     def test_sync_protocol_sources_skips_missing_aggregate_paths(self):
         helper = load_helper()
@@ -129,7 +130,9 @@ class ReleaseSourceTests(unittest.TestCase):
             helper.sync_protocol_sources(workspace)
 
             self.assertEqual(paired_aggregate.read_text(encoding="utf-8"), "canonical protocol source")
-            self.assertEqual(len(helper.PROTOCOL_FILES), 1)
+            self.assertEqual(len(helper.PROTOCOL_FILES), 6)
+            for relative_path in helper.PROTOCOL_FILES[1:]:
+                self.assertFalse((workspace / helper.AGGREGATE_ROOT / relative_path).exists())
 
     def test_addon_archive_is_cache_free_and_supports_material_versions_one_and_two(self):
         helper = load_helper()
