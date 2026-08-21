@@ -15,17 +15,30 @@ from .dto.anim import AnimDto
 from .dto.model import ModelDto
 from .dto.pose import PoseDto
 from .version import EUEFormatVersion
-from .extensions.fmodel import FModelV10ExtensionSnapshot, FModelV10FileKind, collect_fmodel_extensions
+from .extensions.fmodel import (
+    FModelLegacyExtensionSnapshot,
+    FModelIdentityRecord,
+    FModelV10Attribute,
+    FModelV10ExtensionSnapshot,
+    FModelV10FileKind,
+    collect_fmodel_extensions,
+    collect_fmodel_legacy_extensions,
+    decode_legacy_identity_chunk,
+)
 from .wire import UEFormatHeader, parse_body, parse_header
 
 
 class UEFormatImport:
     def __init__(self, options: UEFormatOptions) -> None:
         self.options = options
-        # Populated for V10 files only.  The standard DTO remains independent
-        # until the feature-specific FModel decoder is enabled in a later
-        # migration phase.
-        self.last_fmodel_extensions: FModelV10ExtensionSnapshot | None = None
+        # Populated only when the explicit migration gate is enabled. The
+        # standard DTO remains independent from both V9 and V10 FModel data.
+        self.last_fmodel_extensions: (
+            FModelLegacyExtensionSnapshot | FModelV10ExtensionSnapshot | None
+        ) = None
+        # V9 identity is decoded only when the explicit migration gate is on.
+        # V10 identity remains disabled until its producer contract is frozen.
+        self.last_fmodel_identity: FModelIdentityRecord | None = None
 
     def import_file(self, path: str | Path) -> Object | Action | None:
         created, _ = self.import_file_with_dto(path)
@@ -59,22 +72,56 @@ class UEFormatImport:
         self, ar: FArchiveReader,
     ) -> tuple[Object | Action | None, ModelDto | AnimDto | PoseDto]:
         header, body = parse_header(ar)
+        self.last_fmodel_identity = None
         if header.file_version >= EUEFormatVersion.AttributeFormatRestructure:
             body_bytes = body.read_to_end()
             if self.options.enable_fmodel_v10_extensions:
-                file_kind = FModelV10FileKind(header.identifier)
-                standard_attributes = {
-                    FModelV10FileKind.MODEL: ("LODS", "SKELETON", "COLLISION"),
-                    FModelV10FileKind.ANIM: ("METADATA", "TRACKS", "CURVES"),
-                    FModelV10FileKind.POSE: ("POSES", "CURVES"),
-                }[file_kind]
-                self.last_fmodel_extensions = collect_fmodel_extensions(
-                    file_kind,
-                    body_bytes,
-                    known_standard_attributes=standard_attributes,
-                )
+                try:
+                    file_kind = FModelV10FileKind(header.identifier)
+                except ValueError:
+                    self.last_fmodel_extensions = None
+                else:
+                    standard_attributes = {
+                        FModelV10FileKind.MODEL: ("LODS", "SKELETON", "COLLISION"),
+                        FModelV10FileKind.ANIM: ("METADATA", "TRACKS", "CURVES"),
+                        FModelV10FileKind.POSE: ("POSES", "CURVES"),
+                    }[file_kind]
+                    self.last_fmodel_extensions = collect_fmodel_extensions(
+                        file_kind,
+                        body_bytes,
+                        known_standard_attributes=standard_attributes,
+                    )
             else:
                 self.last_fmodel_extensions = None
+            body = FArchiveReader(body_bytes)
+            body.file_version = header.file_version
+        elif self.options.enable_fmodel_v10_extensions:
+            body_bytes = body.read_to_end()
+            try:
+                file_kind = FModelV10FileKind(header.identifier)
+            except ValueError:
+                self.last_fmodel_extensions = None
+            else:
+                self.last_fmodel_extensions = collect_fmodel_legacy_extensions(
+                    file_kind,
+                    body_bytes,
+                )
+                identity_attribute = (
+                    FModelV10Attribute.SKELETON_IDENTITY
+                    if file_kind is FModelV10FileKind.MODEL
+                    else FModelV10Attribute.TARGET_SKELETON
+                )
+                identity_chunk = self.last_fmodel_extensions.get(identity_attribute)
+                if identity_chunk is not None:
+                    source_kind = (
+                        None
+                        if file_kind is FModelV10FileKind.MODEL
+                        else ("animation" if file_kind is FModelV10FileKind.ANIM else "pose")
+                    )
+                    self.last_fmodel_identity = decode_legacy_identity_chunk(
+                        identity_chunk,
+                        source_kind=source_kind,
+                    )
             body = FArchiveReader(body_bytes)
             body.file_version = header.file_version
         else:

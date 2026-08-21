@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 import gzip
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +10,9 @@ from io_scene_ueformat.importer.extensions.fmodel import (
     FModelV10Attribute,
     FModelV10FileKind,
     collect_fmodel_extensions,
+    collect_fmodel_legacy_extensions,
+    decode_legacy_identity_chunk,
+    promote_legacy_snapshot_to_v10_shape,
     parse_envelope,
 )
 from io_scene_ueformat.importer.extensions.fmodel.attributes import (
@@ -48,6 +52,13 @@ def body(*attributes: tuple[str, bytes]) -> bytes:
     return struct.pack("<i", len(attributes)) + b"".join(
         fstring(name) + struct.pack("<i", len(payload)) + payload
         for name, payload in attributes
+    )
+
+
+def legacy_body(*chunks: tuple[str, int, bytes]) -> bytes:
+    return b"".join(
+        fstring(name) + struct.pack("<ii", array_size, len(payload)) + payload
+        for name, array_size, payload in chunks
     )
 
 
@@ -98,6 +109,102 @@ def test_extension_for_another_file_kind_is_skipped_and_reported() -> None:
 
     assert not snapshot.present
     assert snapshot.unknown_fmodel_attributes == (FModelV10Attribute.MATERIALS.value,)
+
+
+def test_v9_legacy_extension_scanner_preserves_array_size_and_payload() -> None:
+    snapshot = collect_fmodel_legacy_extensions(
+        FModelV10FileKind.MODEL,
+        legacy_body(
+            ("LODS", 1, b"standard"),
+            (FModelV10Attribute.MATERIALS.value, 2, b"legacy-materials"),
+            ("FMODEL_FUTURE_ATTRIBUTE", 1, b"future"),
+        ),
+    )
+
+    chunk = snapshot.get(FModelV10Attribute.MATERIALS)
+    assert chunk is not None
+    assert chunk.array_size == 2
+    assert chunk.payload == b"legacy-materials"
+    assert snapshot.unknown_fmodel_attributes == ("FMODEL_FUTURE_ATTRIBUTE",)
+
+    promoted = promote_legacy_snapshot_to_v10_shape(snapshot)
+    assert promoted.get(FModelV10Attribute.MATERIALS) == b"legacy-materials"
+
+
+def test_v9_legacy_extension_scanner_rejects_duplicate_known_chunk() -> None:
+    data = legacy_body(
+        (FModelV10Attribute.TEXTURES.value, 1, b"one"),
+        (FModelV10Attribute.TEXTURES.value, 1, b"two"),
+    )
+
+    with pytest.raises(ValueError, match="duplicate V9 FModel extension"):
+        collect_fmodel_legacy_extensions(FModelV10FileKind.MODEL, data)
+
+
+def test_v9_identity_payloads_are_decoded_without_importing_v9_modules() -> None:
+    fixtures = Path(__file__).parent / "fixtures"
+    cases = (
+        ("fmodel_skeleton_identity.uemodel", FModelV10FileKind.MODEL, FModelV10Attribute.SKELETON_IDENTITY, None),
+        ("fmodel_target_skeleton.ueanim", FModelV10FileKind.ANIM, FModelV10Attribute.TARGET_SKELETON, "animation"),
+        ("fmodel_target_skeleton.uepose", FModelV10FileKind.POSE, FModelV10Attribute.TARGET_SKELETON, "pose"),
+    )
+
+    for filename, file_kind, attribute, source_kind in cases:
+        header, reader = parse_header(FArchiveReader((fixtures / filename).read_bytes()))
+        snapshot = collect_fmodel_legacy_extensions(file_kind, reader.read_to_end())
+        chunk = snapshot.get(attribute)
+        assert header.file_version < EUEFormatVersion.AttributeFormatRestructure
+        assert chunk is not None
+        identity = decode_legacy_identity_chunk(chunk, source_kind=source_kind)
+        assert identity.version == 1
+        assert identity.skeleton_path.startswith("/")
+        assert len(identity.bone_layout_hash) == 32
+        if source_kind is not None:
+            assert identity.source_path is not None
+
+
+@pytest.mark.parametrize(
+    ("filename", "file_kind", "expected"),
+    [
+        (
+            "fmodel_golden.uemodel",
+            FModelV10FileKind.MODEL,
+            {FModelV10Attribute.MATERIALS, FModelV10Attribute.TEXTURES},
+        ),
+        (
+            "fmodel_v2_deployment.uemodel",
+            FModelV10FileKind.MODEL,
+            {
+                FModelV10Attribute.MATERIALS,
+                FModelV10Attribute.TEXTURES,
+                FModelV10Attribute.PBR_INTERFACES,
+            },
+        ),
+    ],
+)
+def test_v9_real_fmodel_fixtures_are_captured_by_the_version_adapter(
+    filename: str,
+    file_kind: FModelV10FileKind,
+    expected: set[FModelV10Attribute],
+) -> None:
+    fixture = Path(__file__).parent / "fixtures" / filename
+    header, reader = parse_header(FArchiveReader(fixture.read_bytes()))
+    snapshot = collect_fmodel_legacy_extensions(file_kind, reader.read_to_end())
+
+    assert header.file_version < EUEFormatVersion.AttributeFormatRestructure
+    assert {FModelV10Attribute(name) for name in snapshot.attributes} == expected
+
+
+def test_v9_legacy_extension_scanner_rejects_invalid_chunk_lengths() -> None:
+    with pytest.raises(ValueError, match="negative V9 array size"):
+        collect_fmodel_legacy_extensions(
+            FModelV10FileKind.MODEL,
+            legacy_body((FModelV10Attribute.MATERIALS.value, -1, b"payload")),
+        )
+
+    malformed = fstring(FModelV10Attribute.MATERIALS.value) + struct.pack("<ii", 1, 100) + b"short"
+    with pytest.raises(ValueError, match="exceeds available data"):
+        collect_fmodel_legacy_extensions(FModelV10FileKind.MODEL, malformed)
 
 
 @pytest.mark.parametrize(
