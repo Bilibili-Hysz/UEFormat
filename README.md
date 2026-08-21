@@ -105,6 +105,7 @@ addon parity before distribution.
 - [UEModel wire details](docs/uemodel.md)
 - [UEAnim wire details](docs/ueanim.md)
 - [UEPose wire details](docs/uepose.md)
+- [V10 migration notes](docs/v10-migration.md)
 - [Unified FModel → Blender specification](../docs/current/UEFORMAT_BLENDER_PIPELINE_SPEC.md)
 - [Frozen content contract](../docs/current/UEFORMAT_BLENDER_CONTENT_CONTRACT.md)
 - [URI contract](../docs/current/RELATIVE_RESOURCE_URI_CONTRACT.md)
