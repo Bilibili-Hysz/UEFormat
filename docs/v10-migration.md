@@ -71,8 +71,10 @@ V1 skeleton and target-skeleton identity payloads are decoded into a neutral
 `FModelIdentityRecord` by `extensions/fmodel/identity.py`.
 
 This is an intake/semantic checkpoint, not complete FModel compatibility:
-material links, texture tagged-unions, PBR interfaces, URI resolution and
-Blender material creation are still not connected to the V10 creation layer.
+V9 material links, identity/embedded texture shapes and PBR interface records
+now decode into neutral snapshots, but URI resolution, cross-resource binding
+projection and Blender material creation are still not connected to the V10
+creation layer.
 The gate remains disabled by default.
 
 The V9 FModel chunk payloads must not be assumed to be valid V10 payloads.
@@ -88,6 +90,6 @@ $env:PYTHONPATH='plugins/blender'
 python -B -m pytest -q tests/test_v10_fmodel_extension_contract.py tests/test_v10_standard_deserialize.py
 ```
 
-The current migration checkpoint reports 34 passed tests. This does not
+The current migration checkpoint reports 36 passed tests. This does not
 replace real V10 producer output, Blender GUI validation or ZSTD validation
 against Blender's bundled wheel.
