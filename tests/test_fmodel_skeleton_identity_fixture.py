@@ -34,6 +34,7 @@ def test_identity_fixtures_are_valid_standard_archives_with_extensions():
     model = classes.UEModel.from_archive(model_reader)
     assert model.skeleton is not None
     assert model.skeleton_identity is not None
+    assert not model.fmodel_material_extensions_present
     assert [lod.name for lod in model.lods] == ["LOD0"]
 
     anim_reader = animation_archive(anim_data)

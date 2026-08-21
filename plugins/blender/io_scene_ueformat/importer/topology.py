@@ -34,18 +34,13 @@ class UEMODELTopologySummary:
 def _validate_uemodel_lods(lods: list[UEModelLOD]) -> list[UEMODELLodTopologySummary]:
     summaries: list[UEMODELLodTopologySummary] = []
     seen_lods: set[int] = set()
-    expected_slots: tuple[int, ...] | None = None
-    expected_index = 0
     for lod in lods:
         if not lod.name.startswith("LOD") or not lod.name[3:].isdigit():
             raise ValueError(f"Invalid UEMODEL source LOD identity {lod.name!r}")
         lod_index = int(lod.name[3:])
         if lod_index in seen_lods:
             raise ValueError("LOD indices must be unique")
-        if lod_index != expected_index:
-            raise ValueError("LOD order must be deterministic and contiguous")
         seen_lods.add(lod_index)
-        expected_index += 1
         required = {"VERTICES", "INDICES", "MATERIALS"}
         if lod.topology_children and not required.issubset(lod.topology_children):
             missing = ", ".join(sorted(required - lod.topology_children))
@@ -62,10 +57,6 @@ def _validate_uemodel_lods(lods: list[UEModelLOD]) -> list[UEMODELLodTopologySum
         slots = tuple(material.source_slot_index for material in lod.materials)
         if any(slot is None or slot < 0 for slot in slots) or len(set(slots)) != len(slots):
             raise ValueError("Material slots must be unique non-negative indices")
-        if expected_slots is None:
-            expected_slots = slots
-        elif slots != expected_slots:
-            raise ValueError("Material slots must match across LODs")
         for material in lod.materials:
             if material.first_index < 0 or material.first_index % 3 or material.num_faces < 0:
                 raise ValueError("Material slot ranges must be triangle-aligned")
@@ -87,7 +78,11 @@ def _validate_uemodel_skeleton(
     if identity is not None:
         if identity.bone_layout_hash != layout_hash:
             raise ValueError("Skeleton bone layout hash must match Skeleton Identity V1 layout hash")
-        if skeleton.metadata is not None and identity.skeleton_path != skeleton.metadata.skeleton_path:
+        if (
+            skeleton.metadata is not None
+            and skeleton.metadata.skeleton_path
+            and identity.skeleton_path != skeleton.metadata.skeleton_path
+        ):
             raise ValueError("Skeleton identity path must match SKELETON metadata")
     return UEMODELSkeletonTopologySummary(len(skeleton.bones), layout_hash)
 

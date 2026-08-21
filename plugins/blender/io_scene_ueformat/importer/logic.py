@@ -66,6 +66,37 @@ class UEMODELSourceMaterialAmbiguityError(ValueError):
     code = "mato_source_material_mapping_ambiguous"
 
 
+def _should_build_fmodel_materials(
+    data: UEModel,
+    material_options: FModelMaterialImportOptions,
+) -> bool:
+    """Enter the additive material pipeline only for an explicit extension.
+
+    Official UEFormat files carry their base material slots inside each LOD
+    but do not contain any ``FMODEL_*`` material chunk.  Treating an empty
+    extension model as if it were present needlessly constructs the resolver
+    and image repository and makes standard-only imports depend on custom
+    material behavior.
+    """
+    return (
+        material_options.import_materials
+        and data.fmodel_material_extensions_present
+    )
+
+
+def _select_uemodel_lods(lods: list[UEModelLOD], target_lod: int) -> list[UEModelLOD]:
+    """Preserve upstream UEFormat's ordinal, clamped LOD selection semantics.
+
+    The standard writer names each entry from ``SourceLodIndex``. A file may
+    therefore contain only ``LOD1`` when LOD0 was filtered out; its first entry
+    is still importer LOD 0. Skeleton-only UEMODEL files contain no LODs and
+    must continue to the skeleton import path.
+    """
+    if not lods:
+        return []
+    return [lods[min(target_lod, len(lods) - 1)]]
+
+
 def _read_compressed_archive(ar: FArchiveReader) -> FArchiveReader:
     compression_type = ar.read_fstring()
     uncompressed_size = ar.read_int()
@@ -271,13 +302,7 @@ class UEFormatImport:
 
         # meshes
         return_object = None
-        target_lod_name = f"LOD{self.options.target_lod}"
-        selected_lods = [lod for lod in data.lods if lod.name == target_lod_name]
-        if not selected_lods:
-            available = ", ".join(lod.name for lod in data.lods) or "none"
-            raise ValueError(
-                f"Requested source LOD {self.options.target_lod} is unavailable; available LODs: {available}"
-            )
+        selected_lods = _select_uemodel_lods(data.lods, self.options.target_lod)
         created_lods: list[Object] = []
         for lod in selected_lods:
 
@@ -285,7 +310,8 @@ class UEFormatImport:
             mesh_data = self._track("meshes", bpy.data.meshes.new(lod_name))
 
             mesh_data.from_pydata(lod.vertices, [], lod.indices)  # type: ignore[reportArgumentType]
-            mesh_data["fmodel_material_links"] = json.dumps(material_links_metadata(data.material_links))
+            if data.fmodel_material_extensions_present:
+                mesh_data["fmodel_material_links"] = json.dumps(material_links_metadata(data.material_links))
 
             mesh_object = self._track("objects", bpy.data.objects.new(lod_name, mesh_data))
             return_object = mesh_object
@@ -375,7 +401,7 @@ class UEFormatImport:
                     material_indices_for_sections(lod.materials, len(mesh_data.polygons)),
                 )
 
-                if material_options.import_materials:
+                if _should_build_fmodel_materials(data, material_options):
                     model_path = getattr(self, "_fmodel_model_path", Path(name))
                     ue_export_root = material_options.ue_export_root or None
                     bundle_root = material_options.bundle_root or None

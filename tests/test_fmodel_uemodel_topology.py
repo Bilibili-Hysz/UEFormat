@@ -164,6 +164,22 @@ def test_standard_uemodel_topology_summary_is_deterministic_and_complete():
     assert summary.skeleton.bone_layout_hash == model.skeleton_identity.bone_layout_hash
 
 
+def test_standard_uemodel_accepts_noncontiguous_source_lod_identity():
+    model = classes.UEModel(lods=[lod("LOD1")])
+
+    summary = model.topology_summary()
+
+    assert [entry.lod_index for entry in summary.lods] == [1]
+
+
+def test_standard_uemodel_accepts_different_material_slots_per_lod():
+    model = classes.UEModel(lods=[lod("LOD0", slots=(0,)), lod("LOD2", slots=(0, 1))])
+
+    summary = model.topology_summary()
+
+    assert [entry.material_slots for entry in summary.lods] == [(0,), (0, 1)]
+
+
 def test_standard_binary_uemodel_topology_chunks_validate_after_import():
     bones = (("root", -1), ("spine", 0))
     payload = b"".join((
@@ -217,6 +233,54 @@ def test_explicit_skeleton_identity_is_not_marked_as_derived():
 
     assert model.skeleton_identity is not None
     assert model.skeleton_identity_derived is False
+
+
+def test_empty_standard_skeleton_metadata_is_valid_but_does_not_derive_identity():
+    bones = (("root", -1),)
+    skeleton = (
+        chunk("METADATA", 1, struct.pack("<i", 0))
+        + binary_skeleton(bones)[binary_skeleton(bones).find(fstring("BONES")):]
+    )
+    payload = b"".join((
+        chunk("LODS", 1, binary_lod("LOD0")),
+        chunk("SKELETON", 1, skeleton),
+    ))
+
+    model = classes.UEModel.from_archive(archive_with_payload(payload))
+
+    assert model.skeleton is not None
+    assert model.skeleton.metadata is not None
+    assert model.skeleton.metadata.skeleton_path == ""
+    assert model.skeleton_identity is None
+    assert model.skeleton_identity_derived is False
+    model.topology_summary()
+
+
+def test_explicit_identity_can_supply_identity_when_standard_metadata_is_empty():
+    bones = (("root", -1),)
+    skeleton = (
+        chunk("METADATA", 1, struct.pack("<i", 0))
+        + binary_skeleton(bones)[binary_skeleton(bones).find(fstring("BONES")):]
+    )
+    payload = b"".join((
+        chunk("LODS", 1, binary_lod("LOD0")),
+        chunk("SKELETON", 1, skeleton),
+        chunk("FMODEL_SKELETON_IDENTITY", 1, binary_identity(bones)),
+    ))
+
+    model = classes.UEModel.from_archive(archive_with_payload(payload))
+
+    assert model.skeleton_identity is not None
+    assert model.skeleton_identity_derived is False
+    model.topology_summary()
+
+
+def test_nonempty_invalid_standard_skeleton_metadata_remains_rejected():
+    bones = (("root", -1),)
+    payload = chunk("SKELETON", 1, binary_skeleton(bones, "../unsafe"))
+
+    with pytest.raises(ValueError, match="Invalid UEMODEL standard skeleton metadata path"):
+        classes.UEModel.from_archive(archive_with_payload(payload))
 
 
 def test_explicit_identity_matches_project_relative_standard_skeleton_metadata():
@@ -331,10 +395,16 @@ def test_standard_binary_skeleton_requires_metadata_array_size_exactly_one(metad
         classes.UEModel.from_archive(archive_with_payload(chunk("SKELETON", 1, skeleton_payload)))
 
 
-def test_standard_binary_skeleton_rejects_empty_bones_array():
+def test_standard_binary_skeleton_accepts_writer_legal_empty_bones_array():
     metadata = chunk("METADATA", 1, fstring("/Game/Rigs/SK_Test.SK_Test"))
-    with pytest.raises(ValueError, match="BONES child array_size must be greater than 0"):
-        classes.UEModel.from_archive(archive_with_payload(chunk("SKELETON", 1, metadata + chunk("BONES", 0, b""))))
+    model = classes.UEModel.from_archive(
+        archive_with_payload(chunk("SKELETON", 1, metadata + chunk("BONES", 0, b""))),
+    )
+
+    assert model.skeleton is not None
+    assert model.skeleton.bones == []
+    assert model.skeleton_identity is None
+    model.topology_summary()
 
 
 def test_unsigned_weight_bone_index_preserves_32768():
@@ -398,10 +468,8 @@ def test_standard_binary_skeleton_rejects_declared_bone_count_mismatch():
     ("lods", "message"),
     [
         ([lod("LOD0"), lod("LOD0")], "LOD indices must be unique"),
-        ([lod("LOD1"), lod("LOD0")], "LOD order must be deterministic"),
         ([lod("LOD0", indices=(0, 1, 3))], "Indices must be within"),
         ([classes.UEModelLOD(name="LOD0")], "missing required VERTICES"),
-        ([lod("LOD0", slots=(0,)), lod("LOD1", slots=(1,))], "Material slots must match"),
     ],
 )
 def test_standard_uemodel_topology_rejects_invalid_lods(lods, message):

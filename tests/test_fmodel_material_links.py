@@ -218,6 +218,95 @@ def compressed_uemodel_bytes(
     return header + compressed_payload
 
 
+class UEMODELSelectionCompatibilityTests(unittest.TestCase):
+    def test_selection_uses_upstream_ordinal_semantics_for_nonzero_source_lod(self):
+        lod1 = classes.UEModelLOD(name="LOD1")
+
+        self.assertEqual(logic._select_uemodel_lods([lod1], 0), [lod1])
+
+    def test_selection_clamps_to_last_available_lod(self):
+        lod1 = classes.UEModelLOD(name="LOD1")
+        lod3 = classes.UEModelLOD(name="LOD3")
+
+        self.assertEqual(logic._select_uemodel_lods([lod1, lod3], 99), [lod3])
+
+    def test_selection_allows_skeleton_only_uemodel(self):
+        self.assertEqual(logic._select_uemodel_lods([], 0), [])
+
+    def test_standard_only_model_does_not_enter_custom_material_pipeline(self):
+        model = classes.UEModel()
+
+        self.assertFalse(model.fmodel_material_extensions_present)
+        self.assertFalse(logic._should_build_fmodel_materials(
+            model,
+            material_builder.FModelMaterialImportOptions(),
+        ))
+
+    def test_explicit_extension_enters_pipeline_only_when_enabled(self):
+        model = classes.UEModel(fmodel_material_extensions_present=True)
+
+        self.assertTrue(logic._should_build_fmodel_materials(
+            model,
+            material_builder.FModelMaterialImportOptions(),
+        ))
+        self.assertFalse(logic._should_build_fmodel_materials(
+            model,
+            material_builder.FModelMaterialImportOptions(import_materials=False),
+        ))
+
+    def test_compression_transport_does_not_change_extension_presence(self):
+        standard_payload = chunk("LODS", 1, fstring("LOD0") + struct.pack("<i", 0))
+        extended_payload = uemodel_payload(
+            source_materials=((0, "/Game/Materials/M_Body.M_Body"),),
+        )
+
+        class Decompressor:
+            payload = b""
+
+            def decompress(self, compressed, max_output_size):
+                self.assert_payload(compressed, max_output_size)
+                return self.payload
+
+            def assert_payload(self, compressed, max_output_size):
+                if compressed != b"zstd transport":
+                    raise AssertionError("unexpected compressed payload")
+                if max_output_size != len(self.payload):
+                    raise AssertionError("unexpected uncompressed size")
+
+        package = sys.modules["io_scene_ueformat"]
+        previous = getattr(package, "zstd_decompressor", None)
+        decompressor = Decompressor()
+        package.zstd_decompressor = decompressor
+        try:
+            for payload, expected in (
+                (standard_payload, False),
+                (extended_payload, True),
+            ):
+                for compression in ("NONE", "GZIP", "ZSTD"):
+                    with self.subTest(expected=expected, compression=compression):
+                        if compression == "NONE":
+                            archive = reader.FArchiveReader(payload)
+                        else:
+                            if compression == "GZIP":
+                                compressed = gzip.compress(payload)
+                            else:
+                                compressed = b"zstd transport"
+                                decompressor.payload = payload
+                            envelope = (
+                                fstring(compression)
+                                + struct.pack("<ii", len(payload), len(compressed))
+                                + compressed
+                            )
+                            archive = logic._read_compressed_archive(reader.FArchiveReader(envelope))
+                        model = classes.UEModel.from_archive(archive)
+                        self.assertEqual(model.fmodel_material_extensions_present, expected)
+        finally:
+            if previous is None:
+                del package.zstd_decompressor
+            else:
+                package.zstd_decompressor = previous
+
+
 class FModelMaterialLinksReaderTests(unittest.TestCase):
     def read_model(self, *sections: bytes):
         return classes.UEModel.from_archive(reader.FArchiveReader(b"".join(sections)))
@@ -228,6 +317,7 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
             chunk("FMODEL_TEXTURES", 1, legacy_embedded_textures_payload()),
         )
 
+        self.assertTrue(model.fmodel_material_extensions_present)
         self.assertEqual(len(model.material_links.slots), 1)
         slot = model.material_links.slots[0]
         self.assertEqual(slot.slot_index, 4)
@@ -259,6 +349,31 @@ class FModelMaterialLinksReaderTests(unittest.TestCase):
         self.assertEqual(resource.mime, "image/png")
         self.assertEqual(resource.data, b"PNG")
         self.assertIs(resource.kind, classes.TextureResourceKind.LEGACY_EMBEDDED)
+
+    def test_standard_lod_materials_do_not_imply_fmodel_extensions(self):
+        standard_material = fstring("M_Official") + struct.pack("<ii", 0, 1)
+        lod_children = chunk("MATERIALS", 1, standard_material)
+        lod_payload = fstring("LOD0") + struct.pack("<i", len(lod_children)) + lod_children
+
+        model = self.read_model(chunk("LODS", 1, lod_payload))
+
+        self.assertFalse(model.fmodel_material_extensions_present)
+        self.assertEqual(
+            [material.material_name for material in model.lods[0].materials],
+            ["M_Official"],
+        )
+
+    def test_each_material_extension_chunk_sets_wire_presence(self):
+        sections = (
+            chunk("FMODEL_MATERIALS", 0, material_links_payload(slot_count=0)),
+            chunk("FMODEL_TEXTURES", 1, textures_payload(count=0)),
+            chunk("FMODEL_PBR_INTERFACES", 0, pbr_interfaces_payload(records=())),
+        )
+
+        for section in sections:
+            with self.subTest(section=section[:32]):
+                model = self.read_model(section)
+                self.assertTrue(model.fmodel_material_extensions_present)
 
     def test_reads_v2_source_material_indices_without_changing_section_indices(self):
         payload = bytearray(struct.pack("<Bi", 2, 2))

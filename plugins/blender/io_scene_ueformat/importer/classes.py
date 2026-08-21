@@ -76,6 +76,10 @@ class UEModel:
     material_links: FModelMaterialLinks = field(default_factory=lambda: FModelMaterialLinks())
     textures: list[TextureResource] = field(default_factory=list)
     material_textures: FModelMaterialTextures | None = None
+    # Wire-presence marker for the additive FModel material profile.  Empty
+    # decoded collections are not sufficient to distinguish an upstream
+    # standard-only UEMODEL from an explicit zero-record extension chunk.
+    fmodel_material_extensions_present: bool = False
     skeleton_identity: FModelSkeletonIdentity | None = None
     skeleton_identity_derived: bool = False
     # physics = None  # noqa: ERA001
@@ -119,6 +123,13 @@ class UEModel:
                 recognized_chunks.add(section_name)
 
             chunk = ar.chunk(byte_size)
+
+            if section_name in {
+                "FMODEL_MATERIALS",
+                "FMODEL_TEXTURES",
+                "FMODEL_PBR_INTERFACES",
+            }:
+                data.fmodel_material_extensions_present = True
 
             match section_name:
                 case "LODS":
@@ -440,8 +451,6 @@ class UEModelSkeleton:
                         raise ValueError("METADATA child array_size must be 1")
                     data.metadata = UEModelSkeletonMetadata.from_archive(child)
                 case "BONES":
-                    if array_size <= 0:
-                        raise ValueError("BONES child array_size must be greater than 0")
                     data.bones = child.read_array(
                         array_size,
                         lambda ar: Bone.from_archive(ar),
@@ -475,12 +484,17 @@ class UEModelSkeletonMetadata:
     
     @classmethod
     def from_archive(cls, ar: FArchiveReader) -> UEModelSkeletonMetadata:
-        return cls(
-            skeleton_path=_normalize_logical_unreal_path(
-                ar.read_fstring(),
+        skeleton_path = ar.read_fstring()
+        # Upstream UEFormat writes an empty FString when the source mesh has no
+        # resolved USkeleton asset.  Empty means "identity unavailable"; it is
+        # not a URI and must not be passed through logical-path validation.
+        # Every non-empty value remains normalized and fail-closed.
+        if skeleton_path:
+            skeleton_path = _normalize_logical_unreal_path(
+                skeleton_path,
                 "UEMODEL standard skeleton metadata path",
-            ),
-        )
+            )
+        return cls(skeleton_path=skeleton_path)
 
 @dataclass(slots=True)
 class ConvexCollision:

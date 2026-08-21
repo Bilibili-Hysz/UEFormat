@@ -29,6 +29,7 @@ from io_scene_ueformat.importer.material_builder import (  # noqa: E402
 )
 from io_scene_ueformat.importer.material_images import FModelImageRepository  # noqa: E402
 from io_scene_ueformat.importer import logic  # noqa: E402
+from io_scene_ueformat.importer.reader import FArchiveReader  # noqa: E402
 from io_scene_ueformat.options import UEModelOptions  # noqa: E402
 
 
@@ -52,7 +53,13 @@ def fixture():
         slot_index=0, slot_name="slot", unreal_material_path="", material_json_uri="",
         parameters=[parameter("Embedded", "base_color", 3), parameter("External", "normal", 1), parameter("WetnessMask", "wetness_mask", 1)],
     )])
-    return mesh, material, [Material(material_name=material.name, material_path="", first_index=0, num_faces=1)], links
+    return mesh, material, [Material(
+        material_name=material.name,
+        material_path="",
+        first_index=0,
+        num_faces=1,
+        source_slot_index=0,
+    )], links
 
 
 class Images:
@@ -88,7 +95,13 @@ warnings, images = [], Images()
 build_fmodel_materials(mesh, lod_materials, links, images, warnings.append, FModelMaterialImportOptions(keep_unmapped=False))
 material = mesh.materials[0]
 assert "WetnessMask" in material["fmodel_material_link"]
-assert not any(node.type == "FRAME" for node in material.node_tree.nodes)
+assert not any(
+    node.type == "FRAME" and node.label in {
+        "FModel Unmapped Parameters",
+        "Custom / Unmapped (Preserved)",
+    }
+    for node in material.node_tree.nodes
+)
 
 roots = ("D:/exact ue root", "D:/exact bundle root")
 resolver = FModelResourceResolver(model_path="model.ueformat", fmodel_textures=[], ue_export_root=roots[0], bundle_root=roots[1])
@@ -99,7 +112,7 @@ assert resolver.bundle_root == Path(roots[1])
 class RecordingImages:
     roots = []
 
-    def __init__(self, resolver, *_args):
+    def __init__(self, resolver, *_args, **_kwargs):
         self.resolver = resolver
         self.roots.append((resolver.ue_export_root, resolver.bundle_root))
 
@@ -189,6 +202,45 @@ try:
     )
     assert "WetnessMask" in imported.data["fmodel_material_links"]
     assert not any("fmodel_material_link" in material for material in imported.data.materials)
+finally:
+    logic.FModelResourceResolver = original_resolver
+    logic.FModelImageRepository = original_images
+
+
+def without_fmodel_extensions(source):
+    """Keep the upstream chunks from the golden fixture byte-for-byte."""
+    archive = FArchiveReader(source)
+    archive.read_string(8)
+    archive.read_fstring()
+    archive.read_uint8()
+    archive.read_fstring()
+    assert not archive.read_bool()
+    header_end = archive.data.tell()
+    output = bytearray(source[:header_end])
+    while not archive.eof():
+        section_start = archive.data.tell()
+        section_name = archive.read_fstring()
+        archive.read_int()
+        byte_size = archive.read_int()
+        archive.skip(byte_size)
+        if not section_name.startswith("FMODEL_") and section_name != "FUTURE_GOLDEN":
+            output.extend(source[section_start:archive.data.tell()])
+    return bytes(output)
+
+
+# A standard-only upstream file must retain its LOD material slots without
+# instantiating any FModel resolver, image repository, or custom mesh metadata.
+standard_only = without_fmodel_extensions(
+    (REPOSITORY / "tests" / "fixtures" / "fmodel_golden.uemodel").read_bytes()
+)
+logic.FModelResourceResolver = UnexpectedResolver
+logic.FModelImageRepository = UnexpectedImages
+try:
+    imported, model = logic.UEFormatImport(UEModelOptions()).import_data(standard_only)
+    assert not model.fmodel_material_extensions_present
+    assert len(imported.data.materials) == 2
+    assert [material.name for material in imported.data.materials] == ["M_GoldenBody", "M_GoldenOverlay"]
+    assert "fmodel_material_links" not in imported.data
 finally:
     logic.FModelResourceResolver = original_resolver
     logic.FModelImageRepository = original_images
