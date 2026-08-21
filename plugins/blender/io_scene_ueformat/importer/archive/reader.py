@@ -15,7 +15,10 @@ if TYPE_CHECKING:
 
 R = TypeVar("R")
 MAX_ARRAY_COUNT = 1_000_000
-MAX_VECTOR_COUNT = 1_000_000
+# This is a scalar-element bound, not a vertex bound: a normal is four
+# scalars and a large but valid mesh can therefore exceed one million scalar
+# values while remaining well below the archive/resource limits.
+MAX_VECTOR_COUNT = 16_000_000
 
 
 def bytes_to_str(in_bytes: bytes) -> str:

@@ -5,7 +5,7 @@ import numpy as np
 from ...logging import Log
 from ..archive.reader import FArchiveReader
 from ..dto.model import CollisionDto, ModelDto
-from .attributes import iter_attributes
+from .attributes import iter_attributes, require_attribute_eof
 from .lod import read_lod
 from .skeleton import read_skeleton
 
@@ -31,4 +31,6 @@ def read_model(ar: FArchiveReader) -> ModelDto:
                 data.collisions = payload.read_serialized_array(read_collision)
             case _:
                 Log.warn(f"Unknown attribute: {name}")
+                payload.read_to_end()
+        require_attribute_eof(payload, name)
     return data

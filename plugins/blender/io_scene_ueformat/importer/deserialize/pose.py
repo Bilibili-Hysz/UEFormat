@@ -3,7 +3,7 @@ from __future__ import annotations
 from ...logging import Log
 from ..archive.reader import FArchiveReader
 from ..dto.pose import PoseCurveInfluenceDto, PoseDto, PoseEntryDto, PoseKeyDto
-from .attributes import iter_attributes
+from .attributes import iter_attributes, require_attribute_eof
 
 
 def read_pose_key(ar: FArchiveReader) -> PoseKeyDto:
@@ -40,4 +40,6 @@ def read_pose(ar: FArchiveReader) -> PoseDto:
                 data.curve_names = payload.read_serialized_array(lambda section: section.read_fstring())
             case _:
                 Log.warn(f"Unknown attribute: {name}")
+                payload.read_to_end()
+        require_attribute_eof(payload, name)
     return data

@@ -13,7 +13,7 @@ from ..dto.anim import (
     TrackDto,
     VectorKeyDto,
 )
-from .attributes import iter_attributes
+from .attributes import iter_attributes, require_attribute_eof
 
 
 def read_vector_key(ar: FArchiveReader) -> VectorKeyDto:
@@ -67,4 +67,6 @@ def read_anim(ar: FArchiveReader) -> AnimDto:
                 data.curves = payload.read_serialized_array(read_curve)
             case _:
                 Log.warn(f"Unknown attribute: {name}")
+                payload.read_to_end()
+        require_attribute_eof(payload, name)
     return data

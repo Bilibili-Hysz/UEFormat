@@ -5,7 +5,7 @@ import numpy as np
 from ...logging import Log
 from ..archive.reader import FArchiveReader
 from ..dto.model import LodDto, MaterialDto, MorphDeltaDto, MorphDto, VertexColorDto, WeightDto
-from .attributes import iter_attributes
+from .attributes import iter_attributes, require_attribute_eof
 
 
 def read_material(ar: FArchiveReader) -> MaterialDto:
@@ -63,7 +63,9 @@ def read_lod(ar: FArchiveReader) -> LodDto:
                 flattened = np.array(payload.read_float_vector(count * 4))
                 data.normals = flattened.reshape(-1, 4)[:, 1:]
             case "TANGENTS":
-                pass
+                # Tangents are not currently emitted into Blender, but the
+                # bounded payload must still be consumed as a known field.
+                payload.read_to_end()
             case "TEXCOORDS":
                 data.uvs = []
                 for _ in range(payload.read_int()):
@@ -83,4 +85,6 @@ def read_lod(ar: FArchiveReader) -> LodDto:
                 data.morphs = payload.read_serialized_array(read_morph)
             case _:
                 Log.warn(f"Unknown attribute: {name}")
+                payload.read_to_end()
+        require_attribute_eof(payload, name)
     return data
