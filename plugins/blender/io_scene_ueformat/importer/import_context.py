@@ -18,12 +18,18 @@ from .version import EUEFormatVersion
 from .extensions.fmodel import (
     FModelLegacyExtensionSnapshot,
     FModelIdentityRecord,
+    FModelMaterialLinksSnapshot,
+    FModelPBRInterface,
+    FModelTextureSnapshot,
     FModelV10Attribute,
     FModelV10ExtensionSnapshot,
     FModelV10FileKind,
     collect_fmodel_extensions,
     collect_fmodel_legacy_extensions,
     decode_legacy_identity_chunk,
+    decode_legacy_material_links,
+    decode_legacy_pbr,
+    decode_legacy_textures,
 )
 from .wire import UEFormatHeader, parse_body, parse_header
 
@@ -39,6 +45,9 @@ class UEFormatImport:
         # V9 identity is decoded only when the explicit migration gate is on.
         # V10 identity remains disabled until its producer contract is frozen.
         self.last_fmodel_identity: FModelIdentityRecord | None = None
+        self.last_fmodel_material_links: FModelMaterialLinksSnapshot | None = None
+        self.last_fmodel_textures: FModelTextureSnapshot | None = None
+        self.last_fmodel_pbr_interfaces: tuple[FModelPBRInterface, ...] = ()
 
     def import_file(self, path: str | Path) -> Object | Action | None:
         created, _ = self.import_file_with_dto(path)
@@ -73,6 +82,9 @@ class UEFormatImport:
     ) -> tuple[Object | Action | None, ModelDto | AnimDto | PoseDto]:
         header, body = parse_header(ar)
         self.last_fmodel_identity = None
+        self.last_fmodel_material_links = None
+        self.last_fmodel_textures = None
+        self.last_fmodel_pbr_interfaces = ()
         if header.file_version >= EUEFormatVersion.AttributeFormatRestructure:
             body_bytes = body.read_to_end()
             if self.options.enable_fmodel_v10_extensions:
@@ -122,6 +134,15 @@ class UEFormatImport:
                         identity_chunk,
                         source_kind=source_kind,
                     )
+                material_chunk = self.last_fmodel_extensions.get(FModelV10Attribute.MATERIALS)
+                if material_chunk is not None:
+                    self.last_fmodel_material_links = decode_legacy_material_links(material_chunk)
+                texture_chunk = self.last_fmodel_extensions.get(FModelV10Attribute.TEXTURES)
+                if texture_chunk is not None:
+                    self.last_fmodel_textures = decode_legacy_textures(texture_chunk)
+                pbr_chunk = self.last_fmodel_extensions.get(FModelV10Attribute.PBR_INTERFACES)
+                if pbr_chunk is not None:
+                    self.last_fmodel_pbr_interfaces = decode_legacy_pbr(pbr_chunk)
             body = FArchiveReader(body_bytes)
             body.file_version = header.file_version
         else:

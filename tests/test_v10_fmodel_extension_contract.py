@@ -9,9 +9,14 @@ import pytest
 from io_scene_ueformat.importer.extensions.fmodel import (
     FModelV10Attribute,
     FModelV10FileKind,
+    FModelLegacyExtensionChunk,
     collect_fmodel_extensions,
     collect_fmodel_legacy_extensions,
+    decode_legacy_material_links,
     decode_legacy_identity_chunk,
+    decode_legacy_pbr,
+    decode_legacy_textures,
+    decode_texture_payload,
     promote_legacy_snapshot_to_v10_shape,
     parse_envelope,
 )
@@ -193,6 +198,61 @@ def test_v9_real_fmodel_fixtures_are_captured_by_the_version_adapter(
 
     assert header.file_version < EUEFormatVersion.AttributeFormatRestructure
     assert {FModelV10Attribute(name) for name in snapshot.attributes} == expected
+
+
+def test_v9_golden_material_texture_and_pbr_payloads_decode_to_semantic_records() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "fmodel_v2_deployment.uemodel"
+    _, reader = parse_header(FArchiveReader(fixture.read_bytes()))
+    snapshot = collect_fmodel_legacy_extensions(FModelV10FileKind.MODEL, reader.read_to_end())
+
+    materials = decode_legacy_material_links(snapshot.get(FModelV10Attribute.MATERIALS))
+    textures = decode_legacy_textures(snapshot.get(FModelV10Attribute.TEXTURES))
+    pbr = decode_legacy_pbr(snapshot.get(FModelV10Attribute.PBR_INTERFACES))
+
+    assert materials.version == 1
+    assert [slot.slot_name for slot in materials.slots] == ["Body", "Overlay"]
+    assert materials.slots[0].parameters[0].value.uri == "textures/golden_basecolor.png"
+    assert textures.is_legacy_embedded
+    assert len(textures.embedded) == 3
+    assert textures.embedded[0].mime == "image/png"
+    assert len(pbr) == 3
+    assert pbr[-1].role == 9
+
+
+def test_versioned_material_and_identity_texture_shapes_decode_without_v9_imports() -> None:
+    material_payload = (
+        bytes((2,))
+        + struct.pack("<i", 1)
+        + struct.pack("<ii", 0, -1)
+        + fstring("Body")
+        + fstring("/Game/Materials/M_Body.M_Body")
+        + fstring("materials/body.json")
+        + struct.pack("<i", 0)
+    )
+    material_snapshot = decode_legacy_material_links(
+        FModelLegacyExtensionChunk(1, material_payload),
+    )
+    assert material_snapshot.version == 2
+    assert material_snapshot.slots[0].source_material_index is None
+
+    texture_payload = (
+        bytes((2,))
+        + struct.pack("<i", 1)
+        + fstring("texture-a")
+        + fstring("textures/a.png")
+        + bytes((4, 0))
+        + struct.pack("<i", 12)
+        + bytes(range(32))
+        + struct.pack("<i", 1)
+        + fstring("Body")
+        + bytes((0,))
+        + fstring("texture-a")
+        + bytes((1,))
+    )
+    texture_snapshot = decode_texture_payload(texture_payload, array_size=1)
+    assert not texture_snapshot.is_legacy_embedded
+    assert texture_snapshot.textures[0].location_mode == 4
+    assert texture_snapshot.bindings[0].is_srgb
 
 
 def test_v9_legacy_extension_scanner_rejects_invalid_chunk_lengths() -> None:
