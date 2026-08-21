@@ -7,6 +7,7 @@ import struct
 ENVELOPE_VERSION = 1
 ENVELOPE_HEADER_SIZE = 5
 MAX_ENVELOPE_PAYLOAD_BYTES = 64 * 1024 * 1024
+MAX_ENVELOPE_ARRAY_SIZE = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +32,7 @@ def parse_envelope(data: bytes) -> FModelV10Envelope:
     envelope_version, array_size = struct.unpack_from("<Bi", data, 0)
     if envelope_version != ENVELOPE_VERSION:
         raise ValueError(f"unsupported FModel V10 envelope version: {envelope_version}")
-    if array_size < 0:
+    if array_size < 0 or array_size > MAX_ENVELOPE_ARRAY_SIZE:
         raise ValueError(f"invalid FModel V10 array size: {array_size}")
     payload = data[ENVELOPE_HEADER_SIZE:]
     if len(payload) > MAX_ENVELOPE_PAYLOAD_BYTES:

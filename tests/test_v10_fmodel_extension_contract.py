@@ -139,6 +139,9 @@ def test_v10_extension_envelope_rejects_unknown_version_and_negative_count() -> 
     with pytest.raises(ValueError, match="array size"):
         parse_envelope(struct.pack("<Bi", 1, -1) + b"payload")
 
+    with pytest.raises(ValueError, match="array size"):
+        parse_envelope(struct.pack("<Bi", 1, 1_000_001) + b"payload")
+
 
 def test_archive_reader_rejects_truncated_reads_and_negative_vectors() -> None:
     reader = FArchiveReader(b"\x01")

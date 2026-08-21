@@ -16,7 +16,7 @@ from .dto.model import ModelDto
 from .dto.pose import PoseDto
 from .version import EUEFormatVersion
 from .extensions.fmodel import FModelV10ExtensionSnapshot, FModelV10FileKind, collect_fmodel_extensions
-from .wire import parse_body, parse_header
+from .wire import UEFormatHeader, parse_body, parse_header
 
 
 class UEFormatImport:
