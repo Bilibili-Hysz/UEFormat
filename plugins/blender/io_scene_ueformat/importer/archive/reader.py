@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from types import TracebackType
 
 R = TypeVar("R")
+MAX_ARRAY_COUNT = 1_000_000
+MAX_VECTOR_COUNT = 1_000_000
 
 
 def bytes_to_str(in_bytes: bytes) -> str:
@@ -43,43 +45,60 @@ class FArchiveReader:
     def eof(self) -> bool:
         return self.data.tell() >= self.size
 
+    def remaining(self) -> int:
+        return self.size - self.data.tell()
+
+    def _read_exact(self, size: int, description: str) -> bytes:
+        if size < 0 or size > self.remaining():
+            raise ValueError(f"{description} exceeds available data")
+        data = self.data.read(size)
+        if len(data) != size:
+            raise ValueError(f"{description} exceeds available data")
+        return data
+
     def read(self, size: int) -> bytes:
-        return self.data.read(size)
+        return self._read_exact(size, "Read size")
 
     def read_to_end(self) -> bytes:
-        return self.data.read(self.size - self.data.tell())
+        return self._read_exact(self.size - self.data.tell(), "Read-to-end size")
 
     def read_bool(self) -> bool:
-        return struct.unpack("?", self.data.read(1))[0]
+        return struct.unpack("?", self._read_exact(1, "Boolean"))[0]
 
     def read_string(self, size: int) -> str:
-        string = self.data.read(size)
+        string = self._read_exact(size, "String length")
         return bytes_to_str(string)
 
     def read_fstring(self) -> str:
-        (size,) = struct.unpack("i", self.data.read(4))
-        string = self.data.read(size)
+        (size,) = struct.unpack("i", self._read_exact(4, "FString length"))
+        if size < 0:
+            raise ValueError(f"Invalid negative FString length: {size}")
+        string = self._read_exact(size, "FString length")
         return bytes_to_str(string)
 
     def read_int(self) -> int:
-        return struct.unpack("i", self.data.read(4))[0]
+        return struct.unpack("i", self._read_exact(4, "Integer"))[0]
 
     def read_int_vector(self, size: int) -> tuple[int, ...]:
-        if size <= 0:
+        if size < 0:
+            raise ValueError(f"Invalid negative integer vector size: {size}")
+        if size > MAX_VECTOR_COUNT:
+            raise ValueError(f"Integer vector size exceeds maximum {MAX_VECTOR_COUNT}: {size}")
+        if size == 0:
             return ()
-        return struct.unpack(str(size) + "I", self.data.read(size * 4))
+        return struct.unpack(str(size) + "I", self._read_exact(size * 4, "Integer vector"))
 
     def read_short(self) -> int:
-        return struct.unpack("h", self.data.read(2))[0]
+        return struct.unpack("h", self._read_exact(2, "Short"))[0]
 
     def read_ushort(self) -> int:
-        return struct.unpack("H", self.data.read(2))[0]
+        return struct.unpack("H", self._read_exact(2, "Unsigned short"))[0]
 
     def read_byte(self) -> bytes:
-        return struct.unpack("c", self.data.read(1))[0]
+        return struct.unpack("c", self._read_exact(1, "Byte"))[0]
 
     def read_float(self) -> float:
-        return struct.unpack("f", self.data.read(4))[0]
+        return struct.unpack("f", self._read_exact(4, "Float"))[0]
 
     @overload
     def read_float_vector(self, size: Literal[1]) -> npt.NDArray[np.floating]: ...
@@ -93,15 +112,23 @@ class FArchiveReader:
     def read_float_vector(self, size: int) -> npt.NDArray[np.floating]: ...
 
     def read_float_vector(self, size: int) -> npt.NDArray[np.floating]:
-        if size <= 0:
+        if size < 0:
+            raise ValueError(f"Invalid negative float vector size: {size}")
+        if size > MAX_VECTOR_COUNT:
+            raise ValueError(f"Float vector size exceeds maximum {MAX_VECTOR_COUNT}: {size}")
+        if size == 0:
             return np.zeros(0)
-        return np.array(struct.unpack(str(size) + "f", self.data.read(size * 4)))
+        return np.array(struct.unpack(str(size) + "f", self._read_exact(size * 4, "Float vector")))
 
     def read_byte_vector(self, size: int) -> tuple[int, ...]:
-        return struct.unpack(str(size) + "B", self.data.read(size))
+        if size < 0:
+            raise ValueError(f"Invalid negative byte vector size: {size}")
+        if size > MAX_VECTOR_COUNT:
+            raise ValueError(f"Byte vector size exceeds maximum {MAX_VECTOR_COUNT}: {size}")
+        return struct.unpack(str(size) + "B", self._read_exact(size, "Byte vector"))
 
     def skip(self, size: int) -> None:
-        self.data.seek(size, 1)
+        self._read_exact(size, "Skip size")
 
     def read_serialized_array(self, predicate: Callable[[FArchiveReader], R]) -> list[R]:
         count = self.read_int()
@@ -112,6 +139,10 @@ class FArchiveReader:
         count: int,
         predicate: Callable[[FArchiveReader], R],
     ) -> list[R]:
+        if count < 0:
+            raise ValueError(f"Invalid negative array count: {count}")
+        if count > MAX_ARRAY_COUNT:
+            raise ValueError(f"Array count exceeds maximum {MAX_ARRAY_COUNT}: {count}")
         return [predicate(self) for _ in range(count)]
 
     def chunk(self, size: int) -> FArchiveReader:

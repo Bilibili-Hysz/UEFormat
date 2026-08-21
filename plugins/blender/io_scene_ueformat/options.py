@@ -14,6 +14,10 @@ if TYPE_CHECKING:
 class UEFormatOptions:
     link: bool = True
     scale_factor: float = 0.01
+    # Internal migration gate. It only permits collection of validated
+    # FMODEL_* V10 attributes; material/texture decoding remains disabled
+    # until a real V10 producer contract is proven.
+    enable_fmodel_v10_extensions: bool = False
 
     @classmethod
     def from_settings(cls, settings: UFSettings) -> UEFormatOptions:
