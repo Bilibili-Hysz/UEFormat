@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import bpy
 from mathutils import Quaternion, Vector
 
 from ...options import UEPoseOptions
 from ..dto.pose import PoseDto
+from ..runtime_fmodel import skeleton_identity_metadata
+from ..runtime_identity import FModelTargetPoseIdentity
 from ..utils import (
     bone_has_parent,
     bone_hierarchy_has_vertex_groups,
@@ -19,11 +22,23 @@ from ..utils import (
 )
 
 
-def create_pose(dto: PoseDto, options: UEPoseOptions, name: str):
+def create_pose(
+    dto: PoseDto,
+    options: UEPoseOptions,
+    name: str,
+    *,
+    target_identity: FModelTargetPoseIdentity | None = None,
+):
     selected_armature = options.override_skeleton or get_active_armature()
     assert isinstance(selected_armature, bpy.types.Object)
 
     selected_mesh = get_armature_mesh(selected_armature)
+    if target_identity is not None:
+        selected_mesh["fmodel_target_pose_identity"] = json.dumps(
+            skeleton_identity_metadata(target_identity),
+            separators=(",", ":"),
+            sort_keys=True,
+        )
     original_shape_key_lock = selected_mesh.show_only_shape_key
     original_mode = bpy.context.active_object.mode
     bpy.ops.object.mode_set(mode="OBJECT")

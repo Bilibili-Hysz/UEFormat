@@ -13,6 +13,12 @@ from ..typing import UFormatContext
 T = TypeVar("T", bound=UEFormatOptions)
 
 
+def _set_last_import_report(settings, summary: str, report: str, *, status: str) -> None:
+    settings.last_import_summary = summary
+    settings.last_import_report = report
+    settings.last_import_status = status
+
+
 class UFImportBase(Operator, ImportHelper, Generic[T]):
     bl_context = "scene"
     files: CollectionProperty(
@@ -27,9 +33,50 @@ class UFImportBase(Operator, ImportHelper, Generic[T]):
         options = self.options_class.from_settings(context.scene.uf_settings)
 
         directory = Path(self.directory)
+        paths: list[Path] = []
         for file in self.files:
             file: OperatorFileListElement
-            UEFormatImport(options).import_file(directory / file.name)
+            path = directory / file.name
+            try:
+                UEFormatImport(options).import_file(path)
+            except Exception as error:
+                kind = {
+                    UEModelOptions: "Model",
+                    UEAnimOptions: "Animation",
+                    UEPoseOptions: "Pose",
+                }[self.options_class]
+                _set_last_import_report(
+                    context.scene.uf_settings,
+                    f"{kind} import failed",
+                    "\n".join((
+                        "UE Format Import Report",
+                        f"Kind: {kind}",
+                        "Status: Failed",
+                        f"File: {path}",
+                        f"Error: {error}",
+                    )),
+                    status="FAILED",
+                )
+                raise
+            paths.append(path)
+
+        kind = {
+            UEModelOptions: "Model",
+            UEAnimOptions: "Animation",
+            UEPoseOptions: "Pose",
+        }[self.options_class]
+        _set_last_import_report(
+            context.scene.uf_settings,
+            f"{kind} import: {len(paths)} file(s)",
+            "\n".join((
+                "UE Format Import Report",
+                f"Kind: {kind}",
+                "Status: Success",
+                "Files:",
+                *(f"- {path}" for path in paths),
+            )),
+            status="SUCCESS",
+        )
 
         return {"FINISHED"}
 
@@ -89,6 +136,21 @@ class UFImportUEPose(UFImportBase):
             context.scene.uf_settings,
             import_menu=True,
         )
+
+
+class UFCopyLastImportReport(Operator):
+    bl_idname = "uf.copy_last_import_report"
+    bl_label = "Copy Last Import Report"
+    bl_description = "Copy the last UE Format import report to the clipboard"
+
+    @classmethod
+    def poll(cls, context) -> bool:
+        return bool(getattr(context.scene.uf_settings, "last_import_report", ""))
+
+    def execute(self, context: UFormatContext) -> set[str]:
+        context.window_manager.clipboard = context.scene.uf_settings.last_import_report
+        self.report({"INFO"}, "Copied last import report to clipboard")
+        return {"FINISHED"}
 
 
 # drag and drop handler

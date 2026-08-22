@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import bpy
 from bpy.types import Action, FCurve, PoseBone
 from bpy_extras import anim_utils
@@ -7,6 +8,9 @@ from mathutils import Quaternion, Vector
 
 from ...options import UEAnimOptions
 from ..dto.anim import AnimDto, QuatKeyDto, VectorKeyDto
+from ..animation_time import animation_time_provenance, make_source_tick_converter
+from ..runtime_fmodel import FModelAnimationBindingPlan, skeleton_identity_metadata
+from ..runtime_identity import FModelTargetSkeletonIdentity
 from ..utils import best, get_active_armature, get_armature_mesh, get_case_insensitive
 
 
@@ -18,11 +22,54 @@ def _key_quat(key: QuatKeyDto) -> Quaternion:
     return Quaternion((key.value[3], key.value[0], key.value[1], key.value[2]))
 
 
-def create_anim(dto: AnimDto, options: UEAnimOptions, name: str) -> Action:
+def create_anim(
+    dto: AnimDto,
+    options: UEAnimOptions,
+    name: str,
+    *,
+    binding_plan: FModelAnimationBindingPlan | None = None,
+    target_identity: FModelTargetSkeletonIdentity | None = None,
+) -> Action:
     action = bpy.data.actions.new(name=name)
+    if target_identity is not None:
+        action["fmodel_target_skeleton_identity"] = json.dumps(
+            skeleton_identity_metadata(target_identity),
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    if binding_plan is not None:
+        action["fmodel_animation_binding"] = json.dumps(
+            {
+                "bound_track_count": binding_plan.bound_track_count,
+                "skipped_track_count": binding_plan.skipped_track_count,
+                "total_track_count": binding_plan.total_track_count,
+                "strict": options.strict_fmodel_skeleton,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
 
     armature = options.override_skeleton or get_active_armature()
     assert isinstance(armature, bpy.types.Object)
+
+    render = bpy.context.scene.render
+    effective_blender_fps = render.fps / render.fps_base
+    source_rate = dto.metadata.frames_per_second if dto.metadata is not None else effective_blender_fps
+    convert_source_tick = make_source_tick_converter(
+        source_rate,
+        render.fps,
+        render.fps_base,
+    )
+    time_provenance = animation_time_provenance(
+        source_rate,
+        render.fps,
+        render.fps_base,
+    )
+    action["fmodel_animation_time"] = json.dumps(
+        time_provenance,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
     if armature_anim_data := armature.animation_data:
         armature_anim_data.action = None
@@ -36,8 +83,14 @@ def create_anim(dto: AnimDto, options: UEAnimOptions, name: str) -> Action:
         armature.animation_data.action_slot = slot
 
     pose_bones = armature.pose.bones
-    for track in dto.tracks:
-        bone = get_case_insensitive(pose_bones, track.name)
+    for track_index, track in enumerate(dto.tracks):
+        if binding_plan is None:
+            bone = get_case_insensitive(pose_bones, track.name)
+        else:
+            # A None binding is an intentional skip produced by the validated
+            # plan. Never fall back to a second, potentially ambiguous lookup.
+            bound_name = binding_plan.bound_bone_names[track_index]
+            bone = pose_bones.get(bound_name) if bound_name is not None else None
         if bone is None:
             continue
 
@@ -59,7 +112,7 @@ def create_anim(dto: AnimDto, options: UEAnimOptions, name: str) -> Action:
                 curves.append(curve)
             return curves
 
-        def add_key(curves: list[FCurve], vector: Vector | Quaternion, key_index: int, frame: int) -> None:
+        def add_key(curves: list[FCurve], vector: Vector | Quaternion, key_index: int, frame: float) -> None:
             for i in range(len(vector)):
                 curves[i].keyframe_points[key_index].co = frame, vector[i]
                 curves[i].keyframe_points[key_index].interpolation = "LINEAR"
@@ -75,9 +128,9 @@ def create_anim(dto: AnimDto, options: UEAnimOptions, name: str) -> Action:
                 pos = _key_vector(key)
                 pos -= orig_loc
                 pos.rotate(post_quat.conjugated())
-                add_key(loc_curves, pos, index, key.frame)
+                add_key(loc_curves, pos, index, convert_source_tick(key.frame))
             for index, key in enumerate(track.scale_keys):
-                add_key(scale_curves, Vector(key.value), index, key.frame)
+                add_key(scale_curves, Vector(key.value), index, convert_source_tick(key.frame))
 
         rot_curves = create_fcurves("rotation_quaternion", 4, len(track.rotation_keys), bone)
         for index, key in enumerate(track.rotation_keys):
@@ -88,7 +141,7 @@ def create_anim(dto: AnimDto, options: UEAnimOptions, name: str) -> Action:
             q = post_quat.copy()
             q.rotate(p_quat)
             quat.rotate(q.conjugated())
-            add_key(rot_curves, quat, index, key.frame)
+            add_key(rot_curves, quat, index, convert_source_tick(key.frame))
 
         bone.matrix_basis.identity()
 
@@ -114,6 +167,6 @@ def create_anim(dto: AnimDto, options: UEAnimOptions, name: str) -> Action:
                     continue
                 for key in curve.keys:
                     shape_key.value = key.value
-                    shape_key.keyframe_insert(data_path="value", frame=key.frame)
+                    shape_key.keyframe_insert(data_path="value", frame=convert_source_tick(key.frame))
 
     return action

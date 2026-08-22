@@ -97,3 +97,18 @@ def test_importer_uses_one_converter_for_bone_and_morph_keys_and_stores_provenan
     assert "convert_source_tick(key.frame)" in logic
     assert logic.count("convert_source_tick(key.frame)") == 4
     assert logic.count('["fmodel_animation_time"]') == 2
+
+
+def test_validated_animation_binding_never_falls_back_after_an_intentional_skip():
+    create_anim = (
+        Path(__file__).parents[1]
+        / "plugins"
+        / "blender"
+        / "io_scene_ueformat"
+        / "importer"
+        / "create"
+        / "anim.py"
+    ).read_text(encoding="utf-8")
+
+    assert "if binding_plan is None:" in create_anim
+    assert "bone = pose_bones.get(bound_name) if bound_name is not None else None" in create_anim

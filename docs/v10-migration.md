@@ -1,7 +1,8 @@
 # UEFormat V10 migration notes
 
-> This document describes the current importer migration seam. It is not a
-> frozen producer contract and must not be used to generate release files.
+> This document defines the V10 FModel extension seam implemented in this
+> migration branch. It is source-complete, but it remains **unreleased** until
+> Blender headless/GUI and real FModel producer gates pass.
 
 ## Header
 
@@ -55,13 +56,40 @@ synthetic coverage is in `tests/test_v10_standard_deserialize.py`.
 
 ## FModel extension boundary
 
-`FMODEL_*` attributes are collected only through
-`importer/extensions/fmodel/` and only when
-`UEFormatOptions.enable_fmodel_v10_extensions` is explicitly enabled. The V10
-snapshot layer validates names, lengths, file-kind applicability and duplicate
-handling, but does not yet decode V10 producer payloads. The separate V9 bridge
-below can decode selected legacy semantics; it must not be treated as a V10
-producer contract.
+`FMODEL_*` attributes are additive to the V10 body and are collected only
+through `importer/extensions/fmodel/`. `enable_fmodel_extensions` is the
+explicit import option (enabled by default for this FModel edition; callers may
+disable it for a strictly standard-only import). The standard DTO parser always
+skips unknown attributes by their byte sizes. Recognized FModel attributes have
+bounded, duplicate-fail-closed decoding in a Blender-free layer.
+
+### Frozen FModel V10 producer contract
+
+Every recognized attribute has this outer payload envelope:
+
+```text
+uint8 EnvelopeVersion = 1
+int32 ArraySize
+uint8[] SemanticPayload
+```
+
+The semantic payloads are intentionally reused from the validated V9 records:
+
+| File | Attribute | Array size | Semantic payload |
+| --- | --- | --- | --- |
+| UEMODEL | `FMODEL_MATERIALS` | number of linked sections | material-links V2 |
+| UEMODEL | `FMODEL_TEXTURES` | `1` | identity texture table V1/V2 |
+| UEMODEL | `FMODEL_SKELETON_IDENTITY` | `1` | skeleton identity V1 |
+| UEANIM | `FMODEL_TARGET_SKELETON` | `1` | source animation path + skeleton identity V1 |
+| UEPOSE | `FMODEL_TARGET_SKELETON` | `1` | source pose path + skeleton identity V1 |
+
+`FMODEL_TEXTURES` is the sole V10 PBR binding table. Its canonical
+`BaseColor`/`Normal`/`Orm` bindings produce synthetic runtime parameters for
+the existing node builder. V10 producers **must not** emit
+`FMODEL_PBR_INTERFACES`; that attribute is retained only for V9 legacy intake.
+All logical resource URIs remain relative, forward-slash-only and bounded;
+owner-relative/external identity resources are containment-checked and
+SHA-256/byte-length verified before Blender loads them.
 
 ### V9 legacy bridge
 
@@ -71,12 +99,11 @@ recognized FModel records without changing the standard legacy parser. The V9
 V1 skeleton and target-skeleton identity payloads are decoded into a neutral
 `FModelIdentityRecord` by `extensions/fmodel/identity.py`.
 
-This is an intake/semantic checkpoint, not complete FModel compatibility:
-V9 material links, identity/embedded texture shapes and PBR interface records
-now decode into neutral snapshots, but URI resolution, cross-resource binding
-projection and Blender material creation are still not connected to the V10
-creation layer.
-The gate remains disabled by default.
+The V9 bridge decodes material links, identity/embedded texture shapes, PBR
+interfaces and skeleton provenance into the same neutral snapshots used by V10.
+Both V9 and V10 paths then use the common URI resolver, texture tagged-union,
+node builder, material mapping and animation/pose identity validation. This is
+semantic compatibility, not a promise that V9 can read V10 bytes.
 
 The five checked-in V9 FModel fixtures also pass through the standard legacy
 DTO router. This confirms that additive FModel chunks do not desynchronize the
@@ -93,12 +120,16 @@ Run from this repository root:
 
 ```powershell
 $env:PYTHONPATH='plugins/blender'
-python -B -m pytest -q tests/test_v10_fmodel_extension_contract.py tests/test_v10_standard_deserialize.py
+python -B -m pytest -q
 ```
 
-The current migration checkpoint reports 41 passed tests. This does not
-replace real V10 producer output, Blender GUI validation or ZSTD validation
-against Blender's bundled wheel.
+The migration suite includes real C# writer fixtures in
+`tests/fixtures/fmodel_v10/` for NONE, GZIP and ZSTD. The ordinary Python
+environment validates NONE/GZIP; the ZSTD fixture is skipped unless Blender's
+bundled `zstandard` wheel is available. This does not replace real asset
+export, Blender headless scene creation or GUI validation.
 
-This is a source-only Phase 3 checkpoint. No Candidate was built, no Blender
+The branch keeps V9 API-shape tests from the old `classes.py` implementation
+out of V10 collection (`tests/conftest.py`); their five checked-in V9 fixtures
+remain covered by the semantic bridge tests. No Candidate was built, no Blender
 user installation was updated, and the V9/R60 release line remains untouched.

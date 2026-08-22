@@ -45,8 +45,28 @@ class UEFORMAT_PT_Panel(Panel):  # noqa: N801
         box.row().prop(settings, "reorient_bones")
         box.row().prop(settings, "bone_length")
 
+        materials = box.box()
+        materials.label(text="FModel Materials", icon="MATERIAL")
+        materials.row().prop(settings, "enable_fmodel_extensions")
+        material_options = materials.column()
+        material_options.enabled = settings.enable_fmodel_extensions
+        material_options.row().prop(settings, "import_fmodel_materials")
+        material_build = material_options.column()
+        material_build.enabled = settings.import_fmodel_materials
+        material_build.row().prop(settings, "build_fmodel_material_nodes")
+        material_build.row().prop(settings, "load_fmodel_embedded_textures")
+        material_build.row().prop(settings, "load_fmodel_external_textures")
+        material_build.row().prop(settings, "keep_fmodel_unmapped_parameters")
+        external_roots = material_build.column()
+        external_roots.enabled = settings.load_fmodel_external_textures
+        external_roots.row().prop(settings, "fmodel_ue_export_root")
+        external_roots.row().prop(settings, "fmodel_bundle_root")
+
         if not import_menu:
             box.row().operator("uf.import_uemodel", icon="MESH_DATA")
+            report = box.row()
+            report.enabled = bool(settings.last_import_report)
+            report.operator("uf.copy_last_import_report", text="Copy Last Import Report", icon="COPYDOWN")
 
     @staticmethod
     def draw_anim_options(
@@ -59,6 +79,7 @@ class UEFORMAT_PT_Panel(Panel):  # noqa: N801
         box.label(text="Animation", icon="ACTION")
         box.row().prop(settings, "rotation_only")
         box.row().prop(settings, "import_curves")
+        box.row().prop(settings, "strict_fmodel_skeleton")
 
         if not import_menu:
             box.row().operator("uf.import_ueanim", icon="ANIM")
@@ -72,6 +93,7 @@ class UEFORMAT_PT_Panel(Panel):  # noqa: N801
     ) -> None:
         box = obj.layout.box()
         box.label(text="Pose", icon="OUTLINER_OB_ARMATURE")
+        box.row().prop(settings, "strict_fmodel_skeleton")
 
         if not import_menu:
             box.row().operator("uf.import_uepose", icon="ARMATURE_DATA")

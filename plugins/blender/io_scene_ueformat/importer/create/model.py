@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import cast
 
 import bpy
@@ -7,11 +9,82 @@ from bpy.types import ByteColorAttribute, Object
 from mathutils import Vector
 
 from ...options import UEModelOptions
+from ...logging import Log
 from ..dto.model import ModelDto
+from ..fmodel_payload import FModelImportPayload
+from ..runtime_fmodel import FModelResourceResolver, material_links_metadata, skeleton_identity_metadata
+from ..runtime_material_builder import (
+    FModelMaterialImportOptions,
+    build_fmodel_materials,
+    section_ordinal_mapping_for_lod_materials,
+    source_slot_mapping_for_lod_materials,
+)
+from ..runtime_material_images import FModelImageRepository
 from .skeleton import create_skeleton
 
 
-def create_model(dto: ModelDto, options: UEModelOptions, name: str) -> Object | None:
+def _material_options(options: UEModelOptions) -> FModelMaterialImportOptions:
+    return FModelMaterialImportOptions(
+        import_materials=options.import_fmodel_materials,
+        build_nodes=options.build_fmodel_material_nodes,
+        load_embedded=options.load_fmodel_embedded_textures,
+        load_external=options.load_fmodel_external_textures,
+        keep_unmapped=options.keep_fmodel_unmapped_parameters,
+        ue_export_root=options.fmodel_ue_export_root or None,
+        bundle_root=options.fmodel_bundle_root or None,
+    )
+
+
+def _build_fmodel_materials(
+    mesh_data,
+    lod,
+    options: UEModelOptions,
+    payload: FModelImportPayload | None,
+) -> None:
+    if payload is None or payload.material_links is None or not options.import_fmodel_materials:
+        return
+    if payload.model_path is None:
+        # ``import_data`` has no owner path.  Never infer a filesystem root or
+        # create a resolver for such data; embedded resources remain supported.
+        if not payload.embedded_resources:
+            return
+        model_path = Path("unnamed.uemodel")
+    else:
+        model_path = payload.model_path
+    material_options = _material_options(options)
+    resolver = FModelResourceResolver(
+        model_path=model_path,
+        fmodel_textures=payload.embedded_resources,
+        ue_export_root=material_options.ue_export_root,
+        bundle_root=material_options.bundle_root,
+    )
+    images = FModelImageRepository(
+        resolver,
+        model_path,
+        material_options.ue_export_root,
+        material_options.bundle_root,
+    )
+    build_fmodel_materials(
+        mesh_data,
+        lod.materials,
+        payload.material_links,
+        images,
+        Log.warn,
+        material_options,
+        source_slot_to_blender_index=(
+            section_ordinal_mapping_for_lod_materials(lod.materials, payload.material_links)
+            if payload.use_v10_section_mapping
+            else source_slot_mapping_for_lod_materials(lod.materials, payload.material_links)
+        ),
+    )
+
+
+def create_model(
+    dto: ModelDto,
+    options: UEModelOptions,
+    name: str,
+    fmodel_payload: FModelImportPayload | None = None,
+) -> Object | None:
     return_object = None
     target_lod = min(options.target_lod, len(dto.lods) - 1) if dto.lods else 0
     created_lods: list[Object] = []
@@ -28,6 +101,13 @@ def create_model(dto: ModelDto, options: UEModelOptions, name: str) -> Object | 
         return_object = mesh_object
         if options.link:
             bpy.context.collection.objects.link(mesh_object)
+
+        if fmodel_payload is not None and fmodel_payload.material_links is not None:
+            mesh_data["fmodel_material_links"] = json.dumps(
+                material_links_metadata(fmodel_payload.material_links),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
 
         if len(lod.normals) > 0:
             mesh_data.polygons.foreach_set("use_smooth", [True] * len(mesh_data.polygons))
@@ -82,9 +162,11 @@ def create_model(dto: ModelDto, options: UEModelOptions, name: str) -> Object | 
                 for face_index in range(start_face_index, end_face_index):
                     mesh_data.polygons[face_index].material_index = i
 
+            _build_fmodel_materials(mesh_data, lod, options, fmodel_payload)
+
         created_lods.append(mesh_object)
 
-    skeleton_object = create_skeleton(dto, options, name, created_lods)
+    skeleton_object = create_skeleton(dto, options, name, created_lods, fmodel_payload)
     if skeleton_object is not None:
         return_object = skeleton_object
 

@@ -26,13 +26,17 @@ def _require_zstd():
         zstd_decompressor = zstd.ZstdDecompressor()
     return zstd_decompressor
 
-def register() -> None:
+def register(*, headless: bool = False) -> None:
     # ZSTD is resolved lazily by the wire reader.  This keeps registration
     # usable for NONE/GZIP-only environments and avoids importing Blender
     # operators before the add-on is actually registered.
     from . import op
 
-    op.register()
+    op.register(headless=headless)
+
+
+def register_headless() -> None:
+    register(headless=True)
 
 
 def unregister() -> None:

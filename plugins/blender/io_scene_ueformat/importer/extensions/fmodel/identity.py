@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ...archive.reader import FArchiveReader
+from .envelope import parse_envelope
 from .legacy import FModelLegacyExtensionChunk
 
 
@@ -86,3 +87,16 @@ def decode_legacy_identity_chunk(
     if chunk.array_size != 1:
         raise ValueError(f"FModel identity chunk array_size must be 1: {chunk.array_size}")
     return decode_identity_payload(chunk.payload, source_kind=source_kind)
+
+
+def decode_v10_identity_chunk(
+    payload: bytes,
+    *,
+    source_kind: IdentitySourceKind | None = None,
+) -> FModelIdentityRecord:
+    """Decode the frozen V10 envelope around the shared identity payload."""
+
+    envelope = parse_envelope(payload)
+    if envelope.array_size != 1:
+        raise ValueError(f"FModel V10 identity array_size must be 1: {envelope.array_size}")
+    return decode_identity_payload(envelope.payload, source_kind=source_kind)

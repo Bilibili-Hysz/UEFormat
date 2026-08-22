@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from ...archive.reader import FArchiveReader
+from .envelope import parse_envelope
 from .legacy import FModelLegacyExtensionChunk
 
 
@@ -447,3 +448,18 @@ def decode_legacy_textures(chunk: FModelLegacyExtensionChunk) -> FModelTextureSn
 
 def decode_legacy_pbr(chunk: FModelLegacyExtensionChunk) -> tuple[FModelPBRInterface, ...]:
     return decode_pbr_payload(chunk.payload, array_size=chunk.array_size)
+
+
+def decode_v10_material_links(payload: bytes) -> FModelMaterialLinksSnapshot:
+    envelope = parse_envelope(payload)
+    return decode_material_links_payload(envelope.payload, array_size=envelope.array_size)
+
+
+def decode_v10_textures(payload: bytes) -> FModelTextureSnapshot:
+    envelope = parse_envelope(payload)
+    return decode_texture_payload(envelope.payload, array_size=envelope.array_size)
+
+
+def decode_v10_pbr(payload: bytes) -> tuple[FModelPBRInterface, ...]:
+    envelope = parse_envelope(payload)
+    return decode_pbr_payload(envelope.payload, array_size=envelope.array_size)

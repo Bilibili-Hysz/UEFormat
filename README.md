@@ -21,14 +21,14 @@ FModel / CUE4Parse
   -> Blender geometry, materials, animation, pose, diagnostics
 ```
 
-**Addon version:** `1.2.0`
+**Addon version:** V10 manifest `0.10.0` (migration branch; not released)
 **Minimum Blender version:** `4.2.0`
 **Current workflow target:** Blender 5.2
 **Canonical addon source:** `plugins/blender/io_scene_ueformat/`
 
-The full cross-repository specification is maintained at
+The V9 frozen specification is maintained at
 [`../docs/current/UEFORMAT_BLENDER_PIPELINE_SPEC.md`](../docs/current/UEFORMAT_BLENDER_PIPELINE_SPEC.md).
-The frozen machine contract is
+The V9 frozen machine contract is
 [`../docs/current/ueformat-content-contract-v1.json`](../docs/current/ueformat-content-contract-v1.json).
 
 ## Supported FModel profile
@@ -81,18 +81,29 @@ io_scene_ueformat.register_headless()
 Both paths use the same importer, reader, resource resolver and report contract.
 A vendor must not maintain a second protocol implementation.
 
+## V10 migration status
+
+The V10 branch is source-complete for standard V10 parsing plus additive
+FModel materials/textures/skeleton provenance. It reads V9 legacy FModel
+semantic records and V10 FModel attributes, but V9 readers cannot read V10
+files. V10 release is blocked on real FModel output and Blender headless/GUI
+validation; do not sync this worktree into a user add-on directory yet.
+
+See [V10 migration notes](docs/v10-migration.md) for the frozen producer wire
+contract, V9 bridge and test gates.
+
 ## Deployment parity
 
 The following runtime files are parity-critical between this source, the
 FModel Tools V2 vendor and a managed Blender installation:
 
 ```text
-importer/classes.py
-importer/protocol.py
-importer/resources.py
-importer/materials.py
-importer/fmodel.py
-importer/material_images.py
+importer/wire.py
+importer/extensions/fmodel/
+importer/import_context.py
+importer/fmodel_v10_adapter.py
+importer/runtime_*.py
+importer/create/
 op/import_helpers.py
 ```
 

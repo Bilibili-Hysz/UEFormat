@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import cast
 
 import bpy
@@ -8,6 +9,8 @@ from mathutils import Matrix, Quaternion, Vector
 
 from ...options import UEModelOptions
 from ..dto.model import ModelDto
+from ..fmodel_payload import FModelImportPayload
+from ..runtime_fmodel import skeleton_identity_metadata
 from ..dto.skeleton import SkeletonDto
 from ..reorient_utils import reorient_bones
 from ..utils import get_case_insensitive, get_weighted_vertex_group_indices, has_vertex_weights
@@ -22,6 +25,7 @@ def create_skeleton(
     options: UEModelOptions,
     name: str,
     created_lods: list[Object],
+    fmodel_payload: FModelImportPayload | None = None,
 ) -> Object | None:
     skeleton = dto.skeleton
     if skeleton is None:
@@ -33,6 +37,15 @@ def create_skeleton(
     armature_data.display_type = "STICK"
 
     template_armature_object = bpy.data.objects.new(name + "_Template_Skeleton", armature_data)
+    if fmodel_payload is not None and fmodel_payload.skeleton_identity is not None:
+        template_armature_object["fmodel_skeleton_identity"] = json.dumps(
+            skeleton_identity_metadata(fmodel_payload.skeleton_identity),
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        template_armature_object["fmodel_skeleton_identity_source"] = (
+            fmodel_payload.skeleton_identity_source or "unknown"
+        )
     template_armature_object.show_in_front = True
     bpy.context.collection.objects.link(template_armature_object)
     bpy.context.view_layer.objects.active = template_armature_object
@@ -106,6 +119,15 @@ def create_skeleton(
         bpy.data.objects.remove(template_armature_object)
         for lod in created_lods:
             return_object = _bind_lod(lod, armature_data, skeleton, options)
+            if fmodel_payload is not None and fmodel_payload.skeleton_identity is not None:
+                return_object["fmodel_skeleton_identity"] = json.dumps(
+                    skeleton_identity_metadata(fmodel_payload.skeleton_identity),
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                return_object["fmodel_skeleton_identity_source"] = (
+                    fmodel_payload.skeleton_identity_source or "unknown"
+                )
     else:
         template_armature_object.name = name
         return_object = template_armature_object
