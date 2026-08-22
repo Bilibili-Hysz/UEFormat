@@ -57,10 +57,11 @@ synthetic coverage is in `tests/test_v10_standard_deserialize.py`.
 
 `FMODEL_*` attributes are collected only through
 `importer/extensions/fmodel/` and only when
-`UEFormatOptions.enable_fmodel_v10_extensions` is explicitly enabled. The
-current snapshot layer validates names, lengths, file-kind applicability and
-duplicate handling, but does not decode materials, textures, PBR interfaces,
-URIs or skeleton identity.
+`UEFormatOptions.enable_fmodel_v10_extensions` is explicitly enabled. The V10
+snapshot layer validates names, lengths, file-kind applicability and duplicate
+handling, but does not yet decode V10 producer payloads. The separate V9 bridge
+below can decode selected legacy semantics; it must not be treated as a V10
+producer contract.
 
 ### V9 legacy bridge
 
@@ -77,6 +78,11 @@ projection and Blender material creation are still not connected to the V10
 creation layer.
 The gate remains disabled by default.
 
+The five checked-in V9 FModel fixtures also pass through the standard legacy
+DTO router. This confirms that additive FModel chunks do not desynchronize the
+standard model, animation or pose payload. It does not exercise `bpy`, Blender
+scene creation or real filesystem resource resolution.
+
 The V9 FModel chunk payloads must not be assumed to be valid V10 payloads.
 Before any producer or Blender release integration, a versioned V10 extension
 wire contract and a real FModel V10 fixture are required.
@@ -90,6 +96,9 @@ $env:PYTHONPATH='plugins/blender'
 python -B -m pytest -q tests/test_v10_fmodel_extension_contract.py tests/test_v10_standard_deserialize.py
 ```
 
-The current migration checkpoint reports 36 passed tests. This does not
+The current migration checkpoint reports 41 passed tests. This does not
 replace real V10 producer output, Blender GUI validation or ZSTD validation
 against Blender's bundled wheel.
+
+This is a source-only Phase 3 checkpoint. No Candidate was built, no Blender
+user installation was updated, and the V9/R60 release line remains untouched.
