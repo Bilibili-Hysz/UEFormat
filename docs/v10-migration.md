@@ -124,10 +124,13 @@ python -B -m pytest -q
 ```
 
 The migration suite includes real C# writer fixtures in
-`tests/fixtures/fmodel_v10/` for NONE, GZIP and ZSTD. The ordinary Python
-environment validates NONE/GZIP; the ZSTD fixture is skipped unless Blender's
-bundled `zstandard` wheel is available. This does not replace real asset
-export, Blender headless scene creation or GUI validation.
+`tests/fixtures/fmodel_v10/` for NONE, GZIP and ZSTD. A producer harness can
+also generate a minimum real triangle model plus three relative PNG resources
+under ignored `tests/generated/fmodel-v10/`; this exercises V10 LOD parsing,
+URI containment/integrity checks, Blender mesh creation and BaseColor/Normal/
+ORM node construction. The Blender 5.2 headless gate passed with NONE, GZIP,
+ZSTD, extensions disabled, V9 identity, and the generated mesh/material path.
+This still does not replace GUI validation or real FModel asset export.
 
 The branch keeps V9 API-shape tests from the old `classes.py` implementation
 out of V10 collection (`tests/conftest.py`); their five checked-in V9 fixtures

@@ -32,6 +32,18 @@ def _read_fixture(path: Path):
     return header, dto, snapshot
 
 
+def _read_generated_fixture(path: Path):
+    header, body = parse_header(FArchiveReader(path.read_bytes()))
+    body_bytes = body.read_to_end()
+    dto = parse_body(header, FArchiveReader(body_bytes))
+    snapshot = collect_fmodel_extensions(
+        FModelV10FileKind.MODEL,
+        body_bytes,
+        known_standard_attributes=("LODS", "SKELETON", "COLLISION"),
+    )
+    return header, dto, snapshot
+
+
 @pytest.mark.parametrize(
     "filename",
     ["fmodel_v10_none.uemodel", "fmodel_v10_gzip.uemodel"],
@@ -92,4 +104,16 @@ def test_csharp_v10_zstd_fixture_is_a_real_compression_gate() -> None:
     header, dto, snapshot = _read_fixture(FIXTURE_ROOT / "fmodel_v10_zstd.uemodel")
     assert header.object_path.endswith("SM_FModelV10Contract.SM_FModelV10Contract")
     assert len(dto.lods) == 0
+    assert snapshot.present
+
+
+def test_generated_csharp_v10_fixture_contains_real_mesh_geometry() -> None:
+    generated = Path(__file__).parent / "generated" / "fmodel-v10" / "models" / "fmodel_v10_none.uemodel"
+    if not generated.is_file():
+        pytest.skip("run the C# V10 producer harness first")
+    _, dto, snapshot = _read_generated_fixture(generated)
+    assert len(dto.lods) == 1
+    assert dto.lods[0].vertices.shape == (3, 3)
+    assert dto.lods[0].indices.tolist() == [[0, 1, 2]]
+    assert [material.material_name for material in dto.lods[0].materials] == ["Body"]
     assert snapshot.present
