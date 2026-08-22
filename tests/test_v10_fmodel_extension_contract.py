@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 import gzip
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -198,6 +199,53 @@ def test_v9_real_fmodel_fixtures_are_captured_by_the_version_adapter(
 
     assert header.file_version < EUEFormatVersion.AttributeFormatRestructure
     assert {FModelV10Attribute(name) for name in snapshot.attributes} == expected
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_type", "assert_standard_payload"),
+    [
+        (
+            "fmodel_golden.uemodel",
+            ModelDto,
+            lambda data: len(data.lods) == 1 and data.skeleton is None,
+        ),
+        (
+            "fmodel_v2_deployment.uemodel",
+            ModelDto,
+            lambda data: len(data.lods) == 1 and data.skeleton is None,
+        ),
+        (
+            "fmodel_skeleton_identity.uemodel",
+            ModelDto,
+            lambda data: len(data.lods) == 1 and data.skeleton is not None,
+        ),
+        (
+            "fmodel_target_skeleton.ueanim",
+            AnimDto,
+            lambda data: data.metadata is not None and len(data.tracks) == 0,
+        ),
+        (
+            "fmodel_target_skeleton.uepose",
+            PoseDto,
+            lambda data: len(data.poses) == 1,
+        ),
+    ],
+)
+def test_v9_fmodel_fixtures_keep_the_standard_legacy_dto_parseable(
+    filename: str,
+    expected_type: type,
+    assert_standard_payload: Callable[[ModelDto | AnimDto | PoseDto], bool],
+) -> None:
+    """FModel chunks are additive and cannot desynchronize the V9 parser."""
+
+    fixture = Path(__file__).parent / "fixtures" / filename
+    header, reader = parse_header(FArchiveReader(fixture.read_bytes()))
+    data = parse_body(header, reader)
+
+    assert header.file_version < EUEFormatVersion.AttributeFormatRestructure
+    assert isinstance(data, expected_type)
+    assert assert_standard_payload(data)
+    assert reader.eof()
 
 
 def test_v9_golden_material_texture_and_pbr_payloads_decode_to_semantic_records() -> None:
