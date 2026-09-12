@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+from hashlib import sha256
 from pathlib import Path
 
 import bpy
@@ -10,7 +12,9 @@ import bpy
 REPOSITORY = Path(__file__).parents[1]
 PLUGIN_ROOT = REPOSITORY / "plugins" / "blender"
 FIXTURES = REPOSITORY / "tests" / "fixtures"
-GENERATED = REPOSITORY / "tests" / "generated" / "fmodel-v10"
+DEFAULT_GENERATED = REPOSITORY / "tests" / "generated" / "fmodel-v10"
+GENERATED = Path(os.environ.get("FMODEL_V10_GENERATED", DEFAULT_GENERATED)).expanduser().resolve()
+REQUIRE_GENERATED = os.environ.get("FMODEL_V10_REQUIRE_GENERATED", "0") == "1"
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(PLUGIN_ROOT))
@@ -39,8 +43,16 @@ def import_fixture(
 
 report: dict[str, object] = {
     "blender_version": bpy.app.version_string,
+    "generated_root": str(GENERATED),
     "tests": [],
 }
+
+
+def _record_fixture(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        raise AssertionError(f"required generated fixture is missing: {path}")
+    payload = path.read_bytes()
+    return {"path": path.name, "bytes": len(payload), "sha256": sha256(payload).hexdigest()}
 
 io_scene_ueformat.register_headless()
 try:
@@ -82,7 +94,23 @@ try:
         report["zstd"] = "ok"
 
     generated_model = GENERATED / "models" / "fmodel_v10_none.uemodel"
-    if generated_model.is_file():
+    if REQUIRE_GENERATED or generated_model.is_file():
+        generated_files = [
+            GENERATED / "models" / filename
+            for filename in (
+                "fmodel_v10_none.uemodel",
+                "fmodel_v10_gzip.uemodel",
+                "fmodel_v10_zstd.uemodel",
+            )
+        ] + [
+            GENERATED / "Textures" / filename
+            for filename in (
+                "T_FModelV10_BaseColor.png",
+                "T_FModelV10_Normal.png",
+                "T_FModelV10_Orm.png",
+            )
+        ]
+        report["generated_files"] = [_record_fixture(path) for path in generated_files]
         created, dto, importer = import_fixture(
             generated_model,
             export_root=GENERATED,
@@ -105,14 +133,41 @@ try:
             link.from_node == principled and link.to_node == output
             for link in material.node_tree.links
         )
-        assert any(
-            node.type == "TEX_IMAGE"
-            and node.label == "FMODEL_TEXTURES.BaseColor"
+        texture_nodes = {
+            node.label: node
             for node in material.node_tree.nodes
-        )
+            if node.type == "TEX_IMAGE"
+        }
+        assert "FMODEL_TEXTURES.BaseColor" in texture_nodes
+        assert "FMODEL_TEXTURES.Normal" in texture_nodes
+        assert "FMODEL_TEXTURES.Orm" in texture_nodes
+        assert all(node.image is not None for node in texture_nodes.values())
+        assert all(node.image.filepath for node in texture_nodes.values())
         assert any(node.type == "NORMAL_MAP" for node in material.node_tree.nodes)
         assert any(node.type == "SEPARATE_COLOR" for node in material.node_tree.nodes)
         report["generated_mesh_materials"] = "ok"
+
+        # Standard-only consumption of the same producer bytes: with the
+        # extension gate off, the mesh must still import and must not carry
+        # any FModel provenance (this is what a Linked-fallback export plus a
+        # disabled gate looks like downstream).
+        std_created, std_dto, std_importer = import_fixture(
+            generated_model,
+            export_root=GENERATED,
+            extensions=False,
+        )
+        assert std_created is not None
+        assert std_created.type == "MESH"
+        assert len(std_created.data.vertices) == 3
+        assert std_importer.last_fmodel_extensions is None
+        assert std_created.get("fmodel_skeleton_identity") is None
+        assert std_created.get("fmodel_material_links") is None
+        assert all(
+            slot.material is not None
+            and slot.material.get("fmodel_material_link") is None
+            for slot in std_created.material_slots
+        )
+        report["generated_standard_only"] = "ok"
     else:
         report["generated_mesh_materials"] = "not generated"
 
