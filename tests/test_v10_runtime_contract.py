@@ -6,6 +6,15 @@ from pathlib import Path
 import pytest
 
 from io_scene_ueformat.importer.fmodel_payload import FModelImportPayload
+from io_scene_ueformat.importer.fmodel_v10_adapter import to_runtime_material_links
+from io_scene_ueformat.importer.extensions.fmodel.materials import (
+    FModelMaterialLinksSnapshot,
+    FModelMaterialSlot,
+    FModelTextureBinding,
+    FModelTextureMapKind,
+    FModelTextureRecord,
+    FModelTextureSnapshot,
+)
 from io_scene_ueformat.importer.runtime_fmodel import FModelResourceResolver
 from io_scene_ueformat.importer.runtime_resources import TextureResource
 
@@ -65,3 +74,91 @@ def test_owner_relative_identity_texture_rejects_integrity_mismatch(tmp_path: Pa
 
 def test_identity_provenance_source_is_explicit() -> None:
     assert FModelImportPayload().skeleton_identity_source is None
+
+
+def test_v10_material_binding_rejects_ambiguous_slot_name() -> None:
+    materials = FModelMaterialLinksSnapshot(
+        version=2,
+        slots=(
+            FModelMaterialSlot(
+                slot_index=0,
+                slot_name="Body",
+                unreal_material_path="/Game/Materials/M_Body_A.M_Body_A",
+                material_json_uri="",
+                source_material_index=0,
+                parameters=(),
+            ),
+            FModelMaterialSlot(
+                slot_index=1,
+                slot_name="Body",
+                unreal_material_path="/Game/Materials/M_Body_B.M_Body_B",
+                material_json_uri="",
+                source_material_index=1,
+                parameters=(),
+            ),
+        ),
+    )
+    textures = FModelTextureSnapshot(
+        version=2,
+        textures=(
+            FModelTextureRecord(
+                texture_id="texture.base",
+                logical_resource_uri="textures/body.png",
+                is_embedded=False,
+                byte_length=3,
+                content_hash=sha256(b"PNG").digest(),
+                location_mode=1,
+            ),
+        ),
+        bindings=(
+            FModelTextureBinding(
+                material_id="Body",
+                map_kind=FModelTextureMapKind.BASE_COLOR,
+                texture_id="texture.base",
+                is_srgb=True,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="ambiguous across Unreal material identities"):
+        to_runtime_material_links(materials, textures)
+
+
+def test_v10_embedded_identity_record_fails_before_resource_resolution() -> None:
+    materials = FModelMaterialLinksSnapshot(
+        version=2,
+        slots=(
+            FModelMaterialSlot(
+                slot_index=0,
+                slot_name="Body",
+                unreal_material_path="/Game/Materials/M_Body.M_Body",
+                material_json_uri="materials/body.json",
+                source_material_index=0,
+                parameters=(),
+            ),
+        ),
+    )
+    textures = FModelTextureSnapshot(
+        version=2,
+        textures=(
+            FModelTextureRecord(
+                texture_id="texture.embedded",
+                logical_resource_uri="textures/body.png",
+                is_embedded=True,
+                byte_length=3,
+                content_hash=sha256(b"PNG").digest(),
+                location_mode=3,
+            ),
+        ),
+        bindings=(
+            FModelTextureBinding(
+                material_id="Body",
+                map_kind=FModelTextureMapKind.BASE_COLOR,
+                texture_id="texture.embedded",
+                is_srgb=True,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="identity records marked embedded"):
+        to_runtime_material_links(materials, textures)

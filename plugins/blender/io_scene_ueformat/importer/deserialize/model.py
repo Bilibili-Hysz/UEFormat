@@ -5,6 +5,7 @@ import numpy as np
 from ...logging import Log
 from ..archive.reader import FArchiveReader
 from ..dto.model import CollisionDto, ModelDto
+from ..validation import validate_model_dto
 from .attributes import iter_attributes, require_attribute_eof
 from .lod import read_lod
 from .skeleton import read_skeleton
@@ -30,7 +31,10 @@ def read_model(ar: FArchiveReader) -> ModelDto:
             case "COLLISION":
                 data.collisions = payload.read_serialized_array(read_collision)
             case _:
-                Log.warn(f"Unknown attribute: {name}")
+                # FMODEL_* payloads are consumed by the extension
+                # snapshot; the standard reader only skips them as filler.
+                if not name.startswith("FMODEL_"):
+                    Log.warn(f"Unknown attribute: {name}")
                 payload.read_to_end()
         require_attribute_eof(payload, name)
-    return data
+    return validate_model_dto(data)

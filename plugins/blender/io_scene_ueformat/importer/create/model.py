@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import cast
 
 import bpy
+import numpy as np
 from bpy.types import ByteColorAttribute, Object
 from mathutils import Vector
 
@@ -20,6 +21,9 @@ from ..runtime_material_builder import (
     source_slot_mapping_for_lod_materials,
 )
 from ..runtime_material_images import FModelImageRepository
+from ..creation_tracker import UEFormatImportCapture
+from ..mesh_batch import material_indices_for_sections
+from ..morph_batch import morph_coordinates
 from .skeleton import create_skeleton
 
 
@@ -40,6 +44,7 @@ def _build_fmodel_materials(
     lod,
     options: UEModelOptions,
     payload: FModelImportPayload | None,
+    creation_tracker: UEFormatImportCapture | None = None,
 ) -> None:
     if payload is None or payload.material_links is None or not options.import_fmodel_materials:
         return
@@ -63,6 +68,7 @@ def _build_fmodel_materials(
         model_path,
         material_options.ue_export_root,
         material_options.bundle_root,
+        creation_tracker=creation_tracker,
     )
     build_fmodel_materials(
         mesh_data,
@@ -76,6 +82,7 @@ def _build_fmodel_materials(
             if payload.use_v10_section_mapping
             else source_slot_mapping_for_lod_materials(lod.materials, payload.material_links)
         ),
+        creation_tracker=creation_tracker,
     )
 
 
@@ -84,6 +91,7 @@ def create_model(
     options: UEModelOptions,
     name: str,
     fmodel_payload: FModelImportPayload | None = None,
+    creation_tracker: UEFormatImportCapture | None = None,
 ) -> Object | None:
     return_object = None
     target_lod = min(options.target_lod, len(dto.lods) - 1) if dto.lods else 0
@@ -95,9 +103,13 @@ def create_model(
 
         lod_name = f"{name}_{lod.name}"
         mesh_data = bpy.data.meshes.new(lod_name)
+        if creation_tracker is not None:
+            creation_tracker.track("meshes", mesh_data)
         mesh_data.from_pydata(lod.vertices, [], lod.indices)
 
         mesh_object = bpy.data.objects.new(lod_name, mesh_data)
+        if creation_tracker is not None:
+            creation_tracker.track("objects", mesh_object)
         return_object = mesh_object
         if options.link:
             bpy.context.collection.objects.link(mesh_object)
@@ -126,12 +138,25 @@ def create_model(
         if options.import_morph_targets and lod.morphs:
             if not mesh_object.data.shape_keys:
                 mesh_object.shape_key_add(name="Basis", from_mix=False)
+            base_coordinates = np.empty(len(mesh_data.vertices) * 3, dtype=np.float32)
+            can_batch_coordinates = (
+                hasattr(mesh_data.vertices, "foreach_get")
+                and hasattr(mesh_object.data.shape_keys.key_blocks[0].data, "foreach_set")
+            )
+            if can_batch_coordinates:
+                mesh_data.vertices.foreach_get("co", base_coordinates)
             for morph in lod.morphs:
                 key = mesh_object.shape_key_add(from_mix=False)
                 key.name = morph.name
                 key.interpolation = "KEY_LINEAR"
-                for delta in morph.deltas:
-                    key.data[delta.vertex_index].co += Vector(delta.position)
+                if can_batch_coordinates:
+                    key.data.foreach_set(
+                        "co",
+                        morph_coordinates(base_coordinates, morph.deltas),
+                    )
+                else:
+                    for delta in morph.deltas:
+                        key.data[delta.vertex_index].co += Vector(delta.position)
                 key.value = 0
 
         def squish(array):
@@ -156,17 +181,33 @@ def create_model(
                 mat = bpy.data.materials.get(material.material_name)
                 if mat is None:
                     mat = bpy.data.materials.new(name=material.material_name)
+                    if creation_tracker is not None:
+                        creation_tracker.track("materials", mat)
+                    mat["fmodel_importer_owned"] = True
                 mesh_data.materials.append(mat)
-                start_face_index = material.first_index // 3
-                end_face_index = start_face_index + material.num_faces
-                for face_index in range(start_face_index, end_face_index):
-                    mesh_data.polygons[face_index].material_index = i
+            mesh_data.polygons.foreach_set(
+                "material_index",
+                material_indices_for_sections(lod.materials, len(mesh_data.polygons)),
+            )
 
-            _build_fmodel_materials(mesh_data, lod, options, fmodel_payload)
+            _build_fmodel_materials(
+                mesh_data,
+                lod,
+                options,
+                fmodel_payload,
+                creation_tracker,
+            )
 
         created_lods.append(mesh_object)
 
-    skeleton_object = create_skeleton(dto, options, name, created_lods, fmodel_payload)
+    skeleton_object = create_skeleton(
+        dto,
+        options,
+        name,
+        created_lods,
+        fmodel_payload,
+        creation_tracker,
+    )
     if skeleton_object is not None:
         return_object = skeleton_object
 
@@ -175,8 +216,12 @@ def create_model(
             collision_name = index if collision.name == "None" else collision.name
             collision_object_name = f"UCX_{name}_{collision_name}"
             collision_mesh_data = bpy.data.meshes.new(collision_object_name)
+            if creation_tracker is not None:
+                creation_tracker.track("meshes", collision_mesh_data)
             collision_mesh_data.from_pydata(collision.vertices, [], collision.indices)
             collision_mesh_object = bpy.data.objects.new(collision_object_name, collision_mesh_data)
+            if creation_tracker is not None:
+                creation_tracker.track("objects", collision_mesh_object)
             collision_mesh_object.display_type = "WIRE"
             if created_lods:
                 collision_mesh_object.parent = created_lods[0]

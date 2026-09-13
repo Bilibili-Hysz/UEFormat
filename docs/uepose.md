@@ -67,3 +67,6 @@ struct FPoseCurveInfluence
     float Influence;
 }
 ```
+
+Every `CurveIndex` must address the `CURVES` name table. The V10 importer
+rejects an out-of-range index before it mutates the selected armature or mesh.

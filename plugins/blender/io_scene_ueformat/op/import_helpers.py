@@ -7,6 +7,7 @@ from bpy_extras.io_utils import ImportHelper, poll_file_object_drop
 
 from .panels import UEFORMAT_PT_Panel
 from ..importer.import_context import UEFormatImport
+from ..importer.creation_tracker import UEFormatImportCapture
 from ..options import UEAnimOptions, UEFormatOptions, UEModelOptions, UEPoseOptions
 from ..typing import UFormatContext
 
@@ -34,12 +35,14 @@ class UFImportBase(Operator, ImportHelper, Generic[T]):
 
         directory = Path(self.directory)
         paths: list[Path] = []
+        capture = UEFormatImportCapture()
         for file in self.files:
             file: OperatorFileListElement
             path = directory / file.name
             try:
-                UEFormatImport(options).import_file(path)
+                UEFormatImport(options, creation_tracker=capture).import_file(path)
             except Exception as error:
+                capture.rollback()
                 kind = {
                     UEModelOptions: "Model",
                     UEAnimOptions: "Animation",
@@ -59,6 +62,8 @@ class UFImportBase(Operator, ImportHelper, Generic[T]):
                 )
                 raise
             paths.append(path)
+
+        capture.clear()
 
         kind = {
             UEModelOptions: "Model",

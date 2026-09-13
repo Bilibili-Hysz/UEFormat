@@ -13,6 +13,7 @@ from ..dto.anim import (
     TrackDto,
     VectorKeyDto,
 )
+from ..validation import validate_anim_dto
 from .attributes import iter_attributes, require_attribute_eof
 
 
@@ -66,7 +67,10 @@ def read_anim(ar: FArchiveReader) -> AnimDto:
             case "CURVES":
                 data.curves = payload.read_serialized_array(read_curve)
             case _:
-                Log.warn(f"Unknown attribute: {name}")
+                # FMODEL_* payloads are consumed by the extension
+                # snapshot; the standard reader only skips them as filler.
+                if not name.startswith("FMODEL_"):
+                    Log.warn(f"Unknown attribute: {name}")
                 payload.read_to_end()
         require_attribute_eof(payload, name)
-    return data
+    return validate_anim_dto(data)

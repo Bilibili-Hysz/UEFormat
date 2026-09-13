@@ -21,14 +21,16 @@ FModel / CUE4Parse
   -> Blender geometry, materials, animation, pose, diagnostics
 ```
 
-**Addon version:** V10 manifest `0.10.0` (migration branch; not released)
+**Addon version:** V10 manifest `0.10.0` (canonical source migration; not released)
 **Minimum Blender version:** `4.2.0`
 **Current workflow target:** Blender 5.2
 **Canonical addon source:** `plugins/blender/io_scene_ueformat/`
 
-The V9 frozen specification is maintained at
+The active V10 pipeline specification is maintained at
 [`../docs/current/UEFORMAT_BLENDER_PIPELINE_SPEC.md`](../docs/current/UEFORMAT_BLENDER_PIPELINE_SPEC.md).
-The V9 frozen machine contract is
+The active V10 machine contract is
+[`../docs/current/ueformat-v10-active-contract.json`](../docs/current/ueformat-v10-active-contract.json).
+The historical V9 frozen machine contract is
 [`../docs/current/ueformat-content-contract-v1.json`](../docs/current/ueformat-content-contract-v1.json).
 
 ## Supported FModel profile
@@ -83,11 +85,14 @@ A vendor must not maintain a second protocol implementation.
 
 ## V10 migration status
 
-The V10 branch is source-complete for standard V10 parsing plus additive
-FModel materials/textures/skeleton provenance. It reads V9 legacy FModel
-semantic records and V10 FModel attributes, but V9 readers cannot read V10
-files. V10 release is blocked on real FModel output and Blender headless/GUI
-validation; do not sync this worktree into a user add-on directory yet.
+The V10 source migration is complete in the canonical tree for standard V10
+parsing plus additive FModel materials/textures/skeleton provenance. It reads
+V9 legacy FModel semantic records and V10 FModel attributes, but V9 readers
+cannot read V10 files. A historical V2 Vendor promotion from this tree passed
+byte-for-byte parity; the current live destination remains a separate gate and
+is not freshly verified while its Windows ACL is unavailable. Real FModel
+output and Blender 5.2 headless/GUI validation remain release gates, so this
+source promotion is not by itself a Candidate or Stable release.
 
 See [V10 migration notes](docs/v10-migration.md) for the frozen producer wire
 contract, V9 bridge and test gates.
@@ -102,13 +107,19 @@ importer/wire.py
 importer/extensions/fmodel/
 importer/import_context.py
 importer/fmodel_v10_adapter.py
+importer/validation.py
+importer/creation_tracker.py
+importer/mesh_batch.py
+importer/morph_batch.py
 importer/runtime_*.py
 importer/create/
 op/import_helpers.py
 ```
 
-Use the workspace preflight/release tooling to verify source, ZIP and managed
-addon parity before distribution.
+Use the workspace preflight/release tooling to verify source, ZIP, V2 Vendor and
+managed addon parity before distribution. Do not reverse-sync an older Vendor
+into this canonical V10 tree; the standalone source is the single protocol
+implementation.
 
 ## Format documentation
 

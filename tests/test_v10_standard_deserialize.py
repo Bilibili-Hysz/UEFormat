@@ -37,21 +37,41 @@ def float_key(frame: int, value: float) -> bytes:
     return struct.pack("<if", frame, value)
 
 
-def make_model_body() -> bytes:
+def make_model_body(
+    *,
+    weight_bone_index: int = 0,
+    weight_vertex_index: int = 0,
+    bone_parent_index: int = -1,
+    morph_vertex_index: int | None = None,
+) -> bytes:
+    morphs = b""
+    if morph_vertex_index is not None:
+        morph_delta = struct.pack(
+            "<3f3fi",
+            0.1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            morph_vertex_index,
+        )
+        morphs = ("MORPHTARGETS", array(fstring("Smile") + array(morph_delta)))
     lod = attributes(
         ("VERTICES", struct.pack("<i3f", 1, 1.0, 2.0, 3.0)),
         ("NORMALS", struct.pack("<i4f", 1, 1.0, 0.0, 0.0, 1.0)),
         ("TEXCOORDS", struct.pack("<i", 1) + fstring("UV0") + struct.pack("<i2f", 1, 0.25, 0.75)),
         ("INDICES", struct.pack("<i3I", 3, 0, 0, 0)),
         ("MATERIALS", array(fstring("Body") + fstring("/Game/Materials/M_Body") + struct.pack("<ii", 0, 1))),
-        ("WEIGHTS", array(struct.pack("<Hif", 0, 0, 1.0))),
+        ("WEIGHTS", array(struct.pack("<Hif", weight_bone_index, weight_vertex_index, 1.0))),
+        *((morphs,) if morphs else ()),
         ("FUTURE_LOD_ATTRIBUTE", b"ignored"),
     )
     lods = struct.pack("<i", 1) + fstring("LOD0") + lod
 
     bone = (
         fstring("root")
-        + struct.pack("<i", -1)
+        + struct.pack("<i", bone_parent_index)
         + struct.pack("<3f", 0.0, 0.0, 0.0)
         + struct.pack("<4f", 0.0, 0.0, 0.0, 1.0)
         + struct.pack("<3f", 1.0, 1.0, 1.0)
@@ -106,14 +126,14 @@ def make_anim_body() -> bytes:
     )
 
 
-def make_pose_body() -> bytes:
+def make_pose_body(*, curve_index: int = 0) -> bytes:
     pose_key = (
         fstring("root")
         + struct.pack("<3f", 0.0, 0.0, 0.0)
         + struct.pack("<4f", 0.0, 0.0, 0.0, 1.0)
         + struct.pack("<3f", 1.0, 1.0, 1.0)
     )
-    pose_entry = fstring("Neutral") + array(pose_key) + array(struct.pack("<if", 0, 1.0))
+    pose_entry = fstring("Neutral") + array(pose_key) + array(struct.pack("<if", curve_index, 1.0))
     return attributes(
         ("POSES", array(pose_entry)),
         ("CURVES", array(fstring("Smile"))),
@@ -164,12 +184,38 @@ def test_v10_pose_deserializer_reads_pose_keys_and_curve_influences() -> None:
     assert data.poses[0].curves[0].influence == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"weight_bone_index": 1}, "weight bone index"),
+        ({"weight_vertex_index": 1}, "weight vertex index"),
+        ({"bone_parent_index": 1}, "bone parent index"),
+        ({"morph_vertex_index": 1}, "Morph 0 vertex index"),
+    ],
+)
+def test_v10_model_deserializer_rejects_cross_field_references(kwargs, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        read_model(FArchiveReader(make_model_body(**kwargs)))
+
+
+def test_v10_pose_deserializer_rejects_curve_index_outside_curve_table() -> None:
+    with pytest.raises(ValueError, match="pose curve index"):
+        read_pose(FArchiveReader(make_pose_body(curve_index=1)))
+
+
 def test_v10_standard_deserializer_rejects_attribute_trailing_bytes() -> None:
     with pytest.raises(ValueError, match="Trailing bytes in V10 LODS"):
         read_model(FArchiveReader(attributes(("LODS", struct.pack("<i", 0) + b"x"))))
 
     with pytest.raises(ValueError, match="Trailing bytes after V10 attribute envelope"):
         read_model(FArchiveReader(attributes(("LODS", struct.pack("<i", 0))) + b"x"))
+
+
+def test_v10_skeleton_deserializer_rejects_nested_attribute_trailing_bytes() -> None:
+    skeleton = attributes(("METADATA", fstring("/Game/Characters/SKEL_Base") + b"x"))
+
+    with pytest.raises(ValueError, match="Trailing bytes in V10 METADATA attribute"):
+        read_model(FArchiveReader(attributes(("SKELETON", skeleton))))
 
 
 def test_v10_standard_deserializer_rejects_unbounded_attribute_count() -> None:

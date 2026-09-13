@@ -28,14 +28,17 @@ def _resource_cache_key(
 ) -> tuple[str, str, str]:
     """Identify decoded images by Unreal identity, verified bytes, and use."""
     if isinstance(resource, Path):
+        digest = sha256()
         with open(_blender_file_path(resource), "rb") as file:
-            contents = file.read()
+            for block in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(block)
+        content_hash = digest.hexdigest()
     else:
-        contents = resource
+        content_hash = sha256(resource).hexdigest()
     identity = _canonical_unreal_identity(texture.unreal_object_path) or texture.stable_id
     return (
         identity,
-        sha256(contents).hexdigest(),
+        content_hash,
         interpretation,
     )
 
@@ -66,6 +69,28 @@ def _blender_file_path(path: Path) -> str:
     except (AttributeError, OSError):
         pass
     return extended
+
+
+def _image_identity(image: object) -> tuple[str, int]:
+    """Return a stable identity for a Blender datablock wrapper."""
+    as_pointer = getattr(image, "as_pointer", None)
+    if callable(as_pointer):
+        try:
+            pointer = as_pointer()
+        except (AttributeError, ReferenceError, RuntimeError):
+            pointer = 0
+        if pointer:
+            return ("pointer", int(pointer))
+    return ("python", id(image))
+
+
+def _remove_temporary_image(image: object) -> None:
+    """Remove a source image created only for a defensive copy."""
+    try:
+        bpy.data.images.remove(image)
+    except (ReferenceError, RuntimeError):
+        # Blender may have invalidated the wrapper while unwinding an import.
+        pass
 
 
 class FModelImageRepository:
@@ -126,13 +151,19 @@ class FModelImageRepository:
             return image
 
         if isinstance(resource, Path):
-            image = bpy.data.images.load(_blender_file_path(resource), check_existing=True)
-            # A Blender lookup is not proof of local ownership. Only this repository's
-            # cache may be mutated, regardless of global FModel provenance tags.
-            if image not in self._images.values():
-                image = image.copy()
-                if self.creation_tracker is not None:
-                    self.creation_tracker.track("images", image)
+            existing_image_ids = {_image_identity(item) for item in bpy.data.images}
+            loaded_image = bpy.data.images.load(_blender_file_path(resource), check_existing=True)
+            # A Blender lookup is not proof of local ownership. Always copy the
+            # loaded image so COLOR/DATA interpretations and separate repositories
+            # cannot mutate one another. Only remove a source created by this call.
+            source_is_temporary = _image_identity(loaded_image) not in existing_image_ids
+            try:
+                image = loaded_image.copy()
+            finally:
+                if source_is_temporary:
+                    _remove_temporary_image(loaded_image)
+            if self.creation_tracker is not None:
+                self.creation_tracker.track("images", image)
             image["fmodel_source_type"] = "external"
             image["fmodel_source_path"] = str(resource)
         else:

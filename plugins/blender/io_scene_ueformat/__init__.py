@@ -6,10 +6,10 @@ except ModuleNotFoundError:  # Blender loads the bundled wheel during install.
     zstd = None  # type: ignore[assignment]
 
 bl_info = {
-    "name": "UE Format (.uemodel / .ueanim / .uepose)",
+    "name": "UEFormat (.uemodel / .ueanim / .uepose)",
     "author": "Half",
-    "version": (1, 0, 0),
-    "blender": (4, 0, 0),
+    "version": (0, 10, 0),
+    "blender": (4, 2, 0),
     "location": "View3D > Sidebar > UE Format",
     "category": "Import",
 }

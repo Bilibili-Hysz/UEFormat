@@ -15,6 +15,16 @@ def _effective_blender_fps(blender_fps: float, blender_fps_base: float) -> float
     return blender_fps / blender_fps_base
 
 
+def resolve_animation_source_rate(source_rate: float | None, fallback_rate: float) -> float:
+    """Use a valid UE rate, falling back to the effective Blender scene rate."""
+
+    if source_rate is not None and math.isfinite(source_rate) and source_rate > 0:
+        return float(source_rate)
+    if math.isfinite(fallback_rate) and fallback_rate > 0:
+        return float(fallback_rate)
+    raise ValueError("Animation source and fallback rates must contain a finite positive rate")
+
+
 def make_source_tick_converter(
     source_rate: float,
     blender_fps: float,

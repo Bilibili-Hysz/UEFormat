@@ -10,6 +10,7 @@ from mathutils import Matrix, Quaternion, Vector
 from ...options import UEModelOptions
 from ..dto.model import ModelDto
 from ..fmodel_payload import FModelImportPayload
+from ..creation_tracker import UEFormatImportCapture
 from ..runtime_fmodel import skeleton_identity_metadata
 from ..dto.skeleton import SkeletonDto
 from ..reorient_utils import reorient_bones
@@ -26,6 +27,7 @@ def create_skeleton(
     name: str,
     created_lods: list[Object],
     fmodel_payload: FModelImportPayload | None = None,
+    creation_tracker: UEFormatImportCapture | None = None,
 ) -> Object | None:
     skeleton = dto.skeleton
     if skeleton is None:
@@ -34,9 +36,13 @@ def create_skeleton(
         return None
 
     armature_data = bpy.data.armatures.new(name=name)
+    if creation_tracker is not None:
+        creation_tracker.track("armatures", armature_data)
     armature_data.display_type = "STICK"
 
     template_armature_object = bpy.data.objects.new(name + "_Template_Skeleton", armature_data)
+    if creation_tracker is not None:
+        creation_tracker.track("objects", template_armature_object)
     if fmodel_payload is not None and fmodel_payload.skeleton_identity is not None:
         template_armature_object["fmodel_skeleton_identity"] = json.dumps(
             skeleton_identity_metadata(fmodel_payload.skeleton_identity),
@@ -117,8 +123,16 @@ def create_skeleton(
     return_object = None
     if created_lods:
         bpy.data.objects.remove(template_armature_object)
+        if creation_tracker is not None:
+            creation_tracker.discard("objects", template_armature_object)
         for lod in created_lods:
-            return_object = _bind_lod(lod, armature_data, skeleton, options)
+            return_object = _bind_lod(
+                lod,
+                armature_data,
+                skeleton,
+                options,
+                creation_tracker=creation_tracker,
+            )
             if fmodel_payload is not None and fmodel_payload.skeleton_identity is not None:
                 return_object["fmodel_skeleton_identity"] = json.dumps(
                     skeleton_identity_metadata(fmodel_payload.skeleton_identity),
@@ -171,8 +185,20 @@ def _finalize_standalone_armature(
     _apply_bone_colors(armature_object, skeleton)
 
 
-def _bind_lod(lod: Object, armature_data, skeleton: SkeletonDto, options: UEModelOptions) -> Object:
+def _bind_lod(
+    lod: Object,
+    armature_data,
+    skeleton: SkeletonDto,
+    options: UEModelOptions,
+    *,
+    creation_tracker: UEFormatImportCapture | None = None,
+) -> Object:
     armature_object = bpy.data.objects.new(lod.name + "_Skeleton", armature_data)
+    # Register immediately. Binding mutates the LOD and can fail in any of the
+    # mode/operator calls below; the transaction must also remove a partially
+    # initialized Armature Object.
+    if creation_tracker is not None:
+        creation_tracker.track("objects", armature_object)
     armature_object.show_in_front = True
 
     if options.link:

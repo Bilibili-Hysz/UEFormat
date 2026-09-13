@@ -99,6 +99,9 @@ The Blender importer preserves duration by mapping each key with
 `blender_frame = source_tick * (scene_fps / scene_fps_base) / FramesPerSecond`.
 Bone and morph keys use the same mapping. Imported Actions store this policy,
 the source rate, and the effective Blender rate in `fmodel_animation_time`.
+When `FramesPerSecond` is missing or not finite and positive, the importer uses
+the effective Blender scene rate as a bounded fallback and records that rate in
+the same provenance property.
 
 ### `EAdditiveAnimationType`
 

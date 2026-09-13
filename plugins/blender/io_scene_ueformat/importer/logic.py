@@ -6,9 +6,10 @@ entry point so vendor integrations and older smoke scripts do not need a
 flag-day import change.
 """
 
+from .creation_tracker import UEFormatImportCapture
 from .import_context import UEFormatImport
 
-__all__ = ["UEFormatImport"]
+__all__ = ["UEFormatImport", "UEFormatImportCapture"]
 
 # Source-level migration markers retained for downstream contract checks.  The
 # implementation lives in create/anim.py, where the same converter is applied

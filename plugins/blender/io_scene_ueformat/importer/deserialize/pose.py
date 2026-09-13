@@ -3,6 +3,7 @@ from __future__ import annotations
 from ...logging import Log
 from ..archive.reader import FArchiveReader
 from ..dto.pose import PoseCurveInfluenceDto, PoseDto, PoseEntryDto, PoseKeyDto
+from ..validation import validate_pose_dto
 from .attributes import iter_attributes, require_attribute_eof
 
 
@@ -39,7 +40,10 @@ def read_pose(ar: FArchiveReader) -> PoseDto:
             case "CURVES":
                 data.curve_names = payload.read_serialized_array(lambda section: section.read_fstring())
             case _:
-                Log.warn(f"Unknown attribute: {name}")
+                # FMODEL_* payloads are consumed by the extension
+                # snapshot; the standard reader only skips them as filler.
+                if not name.startswith("FMODEL_"):
+                    Log.warn(f"Unknown attribute: {name}")
                 payload.read_to_end()
         require_attribute_eof(payload, name)
-    return data
+    return validate_pose_dto(data)

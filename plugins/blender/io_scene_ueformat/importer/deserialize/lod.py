@@ -84,7 +84,10 @@ def read_lod(ar: FArchiveReader) -> LodDto:
             case "MORPHTARGETS":
                 data.morphs = payload.read_serialized_array(read_morph)
             case _:
-                Log.warn(f"Unknown attribute: {name}")
+                # FMODEL_* payloads are consumed by the extension
+                # snapshot; the standard reader only skips them as filler.
+                if not name.startswith("FMODEL_"):
+                    Log.warn(f"Unknown attribute: {name}")
                 payload.read_to_end()
         require_attribute_eof(payload, name)
     return data

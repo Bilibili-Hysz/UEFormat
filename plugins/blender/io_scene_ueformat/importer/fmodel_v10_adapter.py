@@ -172,6 +172,16 @@ def to_runtime_material_links(
 
     embedded_resources: dict[int, TextureResource] = {}
     if textures is not None:
+        embedded_identity_records = [
+            record.texture_id
+            for record in textures.textures
+            if record.is_embedded
+        ]
+        if embedded_identity_records:
+            raise ValueError(
+                "V10 FMODEL_TEXTURES identity records marked embedded have no payload bytes: "
+                + ", ".join(repr(item) for item in embedded_identity_records)
+            )
         if len({record.texture_id for record in textures.embedded}) != len(textures.embedded):
             raise ValueError("V10 embedded textures contain duplicate ids")
         embedded_resources = {
@@ -208,6 +218,11 @@ def _apply_texture_bindings(
         record = by_id.get(binding.texture_id)
         if not matched_slots or record is None:
             raise ValueError("V10 texture binding references an unknown material or texture")
+        if len({slot.unreal_material_path for slot in matched_slots}) > 1:
+            raise ValueError(
+                "V10 texture binding material_id is ambiguous across Unreal material identities: "
+                f"{binding.material_id}"
+            )
         name, semantic, packing = semantic_by_kind[int(binding.map_kind)]
         for slot in matched_slots:
             matching = [p for p in slot.parameters if p.semantic.casefold() == semantic]

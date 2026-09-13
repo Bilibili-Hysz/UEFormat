@@ -54,6 +54,20 @@ def test_bone_and_morph_ticks_use_identical_fractional_conversion():
     assert math.isclose(bone_frames[-1], 60.0, abs_tol=1e-9)
 
 
+@pytest.mark.parametrize("source_rate", [None, 0.0, -1.0, float("nan")])
+def test_invalid_animation_source_rate_falls_back_to_scene_rate(source_rate):
+    animation_time = load_module()
+
+    assert animation_time.resolve_animation_source_rate(source_rate, 24.0) == 24.0
+
+
+def test_invalid_animation_source_and_scene_rates_are_rejected():
+    animation_time = load_module()
+
+    with pytest.raises(ValueError, match="finite positive rate"):
+        animation_time.resolve_animation_source_rate(0.0, 0.0)
+
+
 @pytest.mark.parametrize(
     ("source_rate", "blender_fps", "blender_fps_base"),
     [(0.0, 24, 1.0), (-1.0, 24, 1.0), (30.0, 0, 1.0), (30.0, 24, 0.0)],

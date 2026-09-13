@@ -3,7 +3,7 @@ from __future__ import annotations
 from ...logging import Log
 from ..archive.reader import FArchiveReader
 from ..dto.skeleton import BoneDto, SkeletonDto, SocketDto, VirtualBoneDto
-from .attributes import iter_attributes
+from .attributes import iter_attributes, require_attribute_eof
 
 
 def read_bone(ar: FArchiveReader) -> BoneDto:
@@ -47,5 +47,7 @@ def read_skeleton(ar: FArchiveReader) -> SkeletonDto:
             case "VIRTUALBONES":
                 data.virtual_bones = payload.read_serialized_array(read_virtual_bone)
             case _:
-                Log.warn(f"Unknown attribute: {name}")
+                if not name.startswith("FMODEL_"):
+                    Log.warn(f"Unknown attribute: {name}")
+        require_attribute_eof(payload, name)
     return data

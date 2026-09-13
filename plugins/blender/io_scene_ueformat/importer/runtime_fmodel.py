@@ -65,6 +65,12 @@ def apply_material_texture_bindings(
                 "Invalid FModel texture binding material_id does not exist in FMODEL_MATERIALS: "
                 f"{binding.material_id}"
             )
+        material_identities = {slot.unreal_material_path for slot in slots}
+        if len(material_identities) > 1:
+            raise ValueError(
+                "Invalid FModel texture binding material_id is ambiguous across Unreal material identities: "
+                f"{binding.material_id}"
+            )
         record = textures_by_id[binding.texture_id]
         name, semantic, packing = _MATERIAL_TEXTURE_PARAMETER_SHAPES[binding.map_kind]
         for slot in slots:

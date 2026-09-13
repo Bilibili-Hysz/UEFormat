@@ -1,8 +1,10 @@
 # UEFormat V10 migration notes
 
 > This document defines the V10 FModel extension seam implemented in this
-> migration branch. It is source-complete, but it remains **unreleased** until
-> Blender headless/GUI and real FModel producer gates pass.
+> migration branch. It is source-complete; a historical V2 Vendor promotion
+> passed byte-for-byte parity, but the current live destination is a separate
+> gate. It remains **unreleased** until Blender headless/GUI and real FModel
+> producer gates pass.
 
 ## Header
 
@@ -41,6 +43,14 @@ negative or excessive attribute counts, truncated payloads and trailing bytes
 outside the envelope. Standard payload readers also require known payloads to
 be fully consumed. This prevents a malformed payload from silently shifting
 the next field while preserving forward-compatible unknown-attribute skips.
+
+After binary decoding, the V10 reader performs a second, Blender-free semantic
+validation pass before scene creation. It checks triangle and collision index
+ranges, vertex-aligned normals/UV/color arrays, material section ranges, weight
+bone/vertex references, Morph vertex references, skeleton parent ordering and
+duplicate bone names. Pose curve influences must reference the declared curve
+table. Invalid references fail closed with a format error; they are not allowed
+to become a partially-created Blender scene.
 
 ### Standard attributes currently covered by the reader
 
@@ -87,6 +97,17 @@ The semantic payloads are intentionally reused from the validated V9 records:
 `BaseColor`/`Normal`/`Orm` bindings produce synthetic runtime parameters for
 the existing node builder. V10 producers **must not** emit
 `FMODEL_PBR_INTERFACES`; that attribute is retained only for V9 legacy intake.
+The texture binding `MaterialId` is the exported section `slot_name`, not a
+filesystem path. If one slot name resolves to multiple Unreal material
+identities, the importer rejects the binding as ambiguous instead of selecting
+one arbitrarily. LODs must expose compatible section ranges before a V10
+section mapping is used; linked mode omits the custom mapping when that
+topology is not compatible, while strict mode fails the import.
+
+V10 `FMODEL_TEXTURES` is an identity and integrity table. It carries logical
+resource URIs, byte lengths and SHA-256 values, but no embedded image bytes.
+Embedded records from older contracts are rejected by the V10 adapter rather
+than being silently reinterpreted as external resources.
 All logical resource URIs remain relative, forward-slash-only and bounded;
 owner-relative/external identity resources are containment-checked and
 SHA-256/byte-length verified before Blender loads them.
@@ -113,6 +134,19 @@ scene creation or real filesystem resource resolution.
 The V9 FModel chunk payloads must not be assumed to be valid V10 payloads.
 Before any producer or Blender release integration, a versioned V10 extension
 wire contract and a real FModel V10 fixture are required.
+
+For animation imports, a finite positive `FramesPerSecond` is used as the
+source tick rate. If that optional metadata is missing or invalid, the importer
+falls back to the effective Blender scene rate and records the selected rate in
+`fmodel_animation_time`; it does not abort only because of a bad source-rate
+field. An invalid Blender scene rate remains an error.
+
+The official Blender addon can read the standard V10 attributes and skips
+`FMODEL_*` attributes by their declared byte sizes. This custom addon reads the
+same standard attributes and additionally consumes the validated FModel
+extensions when enabled. Therefore official files remain importable by the
+custom addon, and custom files remain importable by the official addon with
+custom material/provenance data ignored.
 
 ## Verification
 

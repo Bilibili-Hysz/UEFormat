@@ -108,6 +108,13 @@ Each LOD entry inside `LODS` is an `FStaticDataChunk` named `LOD0`, `LOD1`, etc.
 | `WEIGHTS` | influence count | [FWeight](#structures) x `Count` |
 | `MORPHTARGETS` | morph count | [FMorphTarget](#structures) x `Count` |
 
+The V10 importer validates cross-field references before creating Blender
+datablocks: triangle and collision indices must address their vertex arrays,
+normals/UVs/colors must be vertex-aligned when present, material section ranges
+must stay inside the triangle list, weights must reference an existing bone and
+vertex, and Morph deltas must reference an existing vertex. Skeleton parent
+indices must be `-1` or point to an earlier bone. Invalid data fails closed.
+
 `NORMALS` packing per vertex:
 
 ```csharp

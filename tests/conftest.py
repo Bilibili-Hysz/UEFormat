@@ -10,7 +10,19 @@ porting their assertions to the V10 DTO/creation boundaries.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+PLUGIN_ROOT = WORKSPACE_ROOT / "io_scene_ueformat-fmodel" / "plugins" / "blender"
+
+# The V10 tests are intentionally runnable from the aggregate workspace root
+# (``python -m pytest``), not only from a Blender extension install.  Keep the
+# import path explicit and local to this test collection so a globally
+# installed/managed addon cannot accidentally satisfy the tests.
+if str(PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT))
 
 
 RETIRED_V9_TEST_MODULES = frozenset({

@@ -1,4 +1,5 @@
 from collections.abc import Collection
+from dataclasses import dataclass
 from typing import cast
 
 import bpy
@@ -167,6 +168,106 @@ def bone_swap_orig_parents(armature_obj: bpy.types.Object):
     finally:
         bpy.ops.object.mode_set(mode=original_mode)
         bpy.context.view_layer.objects.active = original_selected_object
+
+
+@dataclass(frozen=True)
+class BoneSwapEditState:
+    """Exact edit-bone state needed to undo ``bone_swap_orig_parents``."""
+
+    parent_name: str | None
+    use_connect: bool
+    head: Vector
+    tail: Vector
+    roll: float
+    custom_properties: tuple[tuple[str, bool, object], ...]
+
+
+_BONE_SWAP_CUSTOM_PROPERTIES = ("orig_parent", "orig_head", "orig_tail", "orig_roll")
+
+
+def _copy_edit_bone_value(value):
+    copy = getattr(value, "copy", None)
+    return copy() if callable(copy) else value
+
+
+def capture_bone_swap_state(armature_obj: bpy.types.Object) -> dict[str, BoneSwapEditState]:
+    """Capture the fields changed by ``bone_swap_orig_parents``.
+
+    The caller must have the armature in Edit Mode.  Keeping this snapshot
+    separate from the toggle helper makes recovery independent of how far a
+    toggle progressed before Blender raised an exception.
+    """
+
+    if armature_obj.mode != "EDIT":
+        raise ValueError("Bone swap state must be captured in Edit Mode")
+
+    return {
+        bone.name: BoneSwapEditState(
+            parent_name=bone.parent.name if bone.parent is not None else None,
+            use_connect=bone.use_connect,
+            head=bone.head.copy(),
+            tail=bone.tail.copy(),
+            roll=bone.roll,
+            custom_properties=tuple(
+                (
+                    key,
+                    key in bone,
+                    _copy_edit_bone_value(bone.get(key)),
+                )
+                for key in _BONE_SWAP_CUSTOM_PROPERTIES
+            ),
+        )
+        for bone in armature_obj.data.edit_bones
+    }
+
+
+def restore_bone_swap_state(
+    armature_obj: bpy.types.Object,
+    state: dict[str, BoneSwapEditState],
+) -> None:
+    """Restore a pre-toggle edit-bone snapshot without a second toggle.
+
+    Parent links are cleared before they are rebuilt so a partially completed
+    toggle cannot leave a transient cycle or make restoration order-dependent.
+    """
+
+    original_active_object = bpy.context.view_layer.objects.active
+    original_mode = getattr(original_active_object, "mode", "OBJECT")
+    try:
+        bpy.context.view_layer.objects.active = armature_obj
+        if armature_obj.mode != "EDIT":
+            bpy.ops.object.mode_set(mode="EDIT")
+        edit_bones = armature_obj.data.edit_bones
+
+        for bone in edit_bones:
+            bone.parent = None
+            bone.use_connect = False
+
+        for name, snapshot in state.items():
+            bone = edit_bones.get(name)
+            if bone is None:
+                continue
+            bone.head = snapshot.head.copy()
+            bone.tail = snapshot.tail.copy()
+            bone.roll = snapshot.roll
+
+        for name, snapshot in state.items():
+            bone = edit_bones.get(name)
+            if bone is None:
+                continue
+            bone.parent = edit_bones.get(snapshot.parent_name) if snapshot.parent_name else None
+            bone.use_connect = snapshot.use_connect
+            for key, existed, value in snapshot.custom_properties:
+                if existed:
+                    bone[key] = _copy_edit_bone_value(value)
+                else:
+                    bone.pop(key, None)
+    finally:
+        try:
+            if armature_obj.mode != original_mode:
+                bpy.ops.object.mode_set(mode=original_mode)
+        finally:
+            bpy.context.view_layer.objects.active = original_active_object
 
 # pitch, yaw, roll
 def make_quat(rot):
