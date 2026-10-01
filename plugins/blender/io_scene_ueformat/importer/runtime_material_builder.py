@@ -114,12 +114,9 @@ def build_fmodel_materials(
         else:
             _build_material(material, mesh, slot, images, warn, options)
         if material_cache is not None:
-            try:
-                material_cache[
-                    (_material_build_profile(options), _material_cache_identity(slot, interfaces, images, options))
-                ] = material
-            except (OSError, RuntimeError, ValueError):
-                pass
+            material_cache[
+                (_material_build_profile(options), _material_cache_identity(slot, interfaces, images, options))
+            ] = material
 
 
 def _source_slot_to_blender_indices(slots, mapping: Mapping[int, int]) -> dict[int, int]:
@@ -262,10 +259,10 @@ def _material_cache_identity(slot, interfaces, images, options=None) -> str:
 
 
 def _find_matching_material(slot, interfaces, images, options, material_cache=None):
-    try:
-        expected_identity = _material_cache_identity(slot, interfaces, images, options)
-    except (OSError, RuntimeError, ValueError):
-        return None
+    # Declared resources requested by the user must pass integrity checks even
+    # when a previously built material could be reused. Never downgrade an
+    # invalid URI/missing file/hash failure into a material-cache miss.
+    expected_identity = _material_cache_identity(slot, interfaces, images, options)
     expected_profile = _material_build_profile(options)
     cache_key = (expected_profile, expected_identity)
     if material_cache is not None:
@@ -292,10 +289,7 @@ def _attach_provenance(material, slot, interfaces, options=None, images=None) ->
     if options is not None:
         material["fmodel_material_build_profile"] = _material_build_profile(options)
     if images is not None:
-        try:
-            material["fmodel_material_cache_identity"] = _material_cache_identity(slot, interfaces, images, options)
-        except (OSError, RuntimeError, ValueError):
-            material.pop("fmodel_material_cache_identity", None)
+        material["fmodel_material_cache_identity"] = _material_cache_identity(slot, interfaces, images, options)
     metadata = material_links_metadata(FModelMaterialLinks(slots=[slot], pbr_interfaces=list(interfaces)))
     material["fmodel_parameter_metadata"] = json.dumps([
         parameter for parameter in metadata["slots"][0]["parameters"] if parameter["kind"] in {2, 3}
@@ -526,8 +520,9 @@ def _load_image(parameter: FModelMaterialParameter, semantic: str, images: FMode
     try:
         return images.get_image(parameter, interpretation)
     except (OSError, RuntimeError, ValueError) as exc:
-        warn(f"FModel texture parameter {parameter.name!r} could not be resolved: {exc}")
-        return None
+        raise ValueError(
+            f"FModel texture parameter {parameter.name!r} could not be resolved: {exc}"
+        ) from exc
 
 
 def _link_uv(mesh, parameter: FModelMaterialParameter, texture, nodes, links) -> bool:
@@ -620,8 +615,9 @@ def _build_v2_material(material, mesh, slot, interfaces, images, warn, options) 
                 try:
                     image = images.get_image(parameter, interpretation)
                 except (OSError, RuntimeError, ValueError) as exc:
-                    warn(f"FModel texture parameter {parameter.name!r} could not be resolved: {exc}")
-                    continue
+                    raise ValueError(
+                        f"FModel texture parameter {parameter.name!r} could not be resolved: {exc}"
+                    ) from exc
                 source_y = pbr_y if roles else custom_y
                 node = nodes.new("ShaderNodeTexImage")
                 node.name = f"{parameter.name} ({interpretation})"
