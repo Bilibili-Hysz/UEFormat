@@ -71,26 +71,33 @@ def _blender_file_path(path: Path) -> str:
     return extended
 
 
-def _image_identity(image: object) -> tuple[str, int]:
-    """Return a stable identity for a Blender datablock wrapper."""
-    as_pointer = getattr(image, "as_pointer", None)
-    if callable(as_pointer):
+def _effective_interpretation(texture: TextureResource, requested: str) -> str:
+    """Keep color transfer metadata separate from data-channel usage."""
+    requested = requested.upper()
+    if requested == "DATA":
+        return "DATA"
+    if requested != "COLOR":
+        raise ValueError(f"Unsupported FModel image color interpretation: {requested}")
+    # The frozen wire enum is 0=linear, 1=sRGB. Data roles always bypass color
+    # transforms, even when the source texture was tagged sRGB in Unreal.
+    if texture.color_space not in {0, 1}:
+        raise ValueError(f"Unsupported FModel source color space: {texture.color_space}")
+    return "SRGB_COLOR" if texture.color_space == 1 else "LINEAR_COLOR"
+
+
+def _set_image_colorspace(image, interpretation: str) -> None:
+    names = {
+        "SRGB_COLOR": ("sRGB",),
+        "LINEAR_COLOR": ("Linear Rec.709", "Linear"),
+        "DATA": ("Non-Color",),
+    }[interpretation]
+    for name in names:
         try:
-            pointer = as_pointer()
-        except (AttributeError, ReferenceError, RuntimeError):
-            pointer = 0
-        if pointer:
-            return ("pointer", int(pointer))
-    return ("python", id(image))
-
-
-def _remove_temporary_image(image: object) -> None:
-    """Remove a source image created only for a defensive copy."""
-    try:
-        bpy.data.images.remove(image)
-    except (ReferenceError, RuntimeError):
-        # Blender may have invalidated the wrapper while unwinding an import.
-        pass
+            image.colorspace_settings.name = name
+            return
+        except (TypeError, ValueError):
+            continue
+    raise ValueError(f"Blender color configuration has no space for {interpretation}")
 
 
 class FModelImageRepository:
@@ -131,17 +138,13 @@ class FModelImageRepository:
         parameter: FModelMaterialParameter,
         color_interpretation: str,
     ) -> tuple[str, str, str]:
-        interpretation = color_interpretation.upper()
-        if interpretation not in {"COLOR", "DATA"}:
-            raise ValueError(f"Unsupported FModel image color interpretation: {color_interpretation}")
+        interpretation = _effective_interpretation(parameter.texture, color_interpretation)
         resource = self.resolver.resolve_texture(parameter.texture)
         return self._resource_cache_key_for(parameter.texture, resource, interpretation)
 
     def get_image(self, parameter: FModelMaterialParameter, color_interpretation: str) -> bpy.types.Image:
         """Return a cached Blender image for an FModel texture parameter."""
-        interpretation = color_interpretation.upper()
-        if interpretation not in {"COLOR", "DATA"}:
-            raise ValueError(f"Unsupported FModel image color interpretation: {color_interpretation}")
+        interpretation = _effective_interpretation(parameter.texture, color_interpretation)
 
         texture = parameter.texture
         resource = self.resolver.resolve_texture(texture)
@@ -150,34 +153,35 @@ class FModelImageRepository:
         if image is not None:
             return image
 
-        if isinstance(resource, Path):
-            existing_image_ids = {_image_identity(item) for item in bpy.data.images}
-            loaded_image = bpy.data.images.load(_blender_file_path(resource), check_existing=True)
-            # A Blender lookup is not proof of local ownership. Always copy the
-            # loaded image so COLOR/DATA interpretations and separate repositories
-            # cannot mutate one another. Only remove a source created by this call.
-            source_is_temporary = _image_identity(loaded_image) not in existing_image_ids
-            try:
-                image = loaded_image.copy()
-            finally:
-                if source_is_temporary:
-                    _remove_temporary_image(loaded_image)
-            if self.creation_tracker is not None:
-                self.creation_tracker.track("images", image)
-            image["fmodel_source_type"] = "external"
-            image["fmodel_source_path"] = str(resource)
-        else:
-            image = bpy.data.images.new(f"FModelEmbedded_{texture.id}", 8, 8)
-            if self.creation_tracker is not None:
-                self.creation_tracker.track("images", image)
-            image.pack(data=resource, data_len=len(resource))
-            image.source = "FILE"
-            image.alpha_mode = "CHANNEL_PACKED"
-            image["fmodel_source_type"] = "embedded"
-            image["fmodel_source_id"] = texture.id
+        image = None
+        try:
+            if isinstance(resource, Path):
+                # A same-path datablock may contain stale packed bytes. Decode the
+                # verified file afresh and leave all preexisting user images alone.
+                image = bpy.data.images.load(_blender_file_path(resource), check_existing=False)
+                image.name = resource.name
+                image["fmodel_source_type"] = "external"
+                image["fmodel_source_path"] = str(resource)
+            else:
+                image = bpy.data.images.new(f"FModelEmbedded_{texture.id}", 8, 8)
+                image.pack(data=resource, data_len=len(resource))
+                image.source = "FILE"
+                image.alpha_mode = "CHANNEL_PACKED"
+                image["fmodel_source_type"] = "embedded"
+                image["fmodel_source_id"] = texture.id
 
-        image["fmodel_color_interpretation"] = interpretation
-        image.colorspace_settings.name = "sRGB" if interpretation == "COLOR" else "Non-Color"
+            _set_image_colorspace(image, interpretation)
+            image["fmodel_color_interpretation"] = interpretation
+            image["fmodel_color_space"] = image.colorspace_settings.name
+            image["fmodel_texture_id"] = texture.stable_id or str(texture.id)
+            image["fmodel_texture_uri"] = texture.uri
+            image["fmodel_content_sha256"] = cache_key[1]
+            image["fmodel_source_color_space"] = texture.color_space
+            if self.creation_tracker is not None:
+                self.creation_tracker.track("images", image)
+        except Exception:
+            if image is not None:
+                bpy.data.images.remove(image)
+            raise
         self._images[cache_key] = image
         return image
-

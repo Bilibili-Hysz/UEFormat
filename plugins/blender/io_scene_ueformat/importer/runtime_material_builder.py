@@ -217,6 +217,7 @@ def _material_link_metadata(slot, interfaces) -> dict[str, object]:
 
 def _material_build_profile(options) -> str:
     return json.dumps({
+        "implementation_version": 2,
         "build_nodes": options.build_nodes,
         "load_embedded": options.load_embedded,
         "load_external": options.load_external,

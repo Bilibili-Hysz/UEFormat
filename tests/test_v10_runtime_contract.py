@@ -162,3 +162,31 @@ def test_v10_embedded_identity_record_fails_before_resource_resolution() -> None
 
     with pytest.raises(ValueError, match="identity records marked embedded"):
         to_runtime_material_links(materials, textures)
+
+
+def test_inferred_export_tree_allows_sibling_mount_but_rejects_escape(tmp_path):
+    model = tmp_path / "Exports/Game/Content/Models/Model.uemodel"
+    model.parent.mkdir(parents=True)
+    payload = b"verified texture"
+    sibling = tmp_path / "Exports/Engine/Content/Textures/T.png"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(payload)
+    resolver = FModelResourceResolver(model_path=model, fmodel_textures={}, ue_export_root=None, bundle_root=None)
+    assert resolver.resolve_texture(_identity_texture("../../../Engine/Content/Textures/T.png", payload)) == sibling.resolve()
+    outside = tmp_path / "Outside.png"
+    outside.write_bytes(payload)
+    with pytest.raises(ValueError, match="escapes"):
+        resolver.resolve_texture(_identity_texture("../../../../Outside.png", payload))
+
+
+def test_inferred_export_root_identity_allows_sibling_mount(tmp_path):
+    model = tmp_path / "Exports/Game/Content/Models/Model.uemodel"
+    model.parent.mkdir(parents=True)
+    payload = b"verified texture"
+    sibling = tmp_path / "Exports/Engine/Content/Textures/T.png"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(payload)
+    resolver = FModelResourceResolver(model_path=model, fmodel_textures={}, ue_export_root=None, bundle_root=None)
+    texture = _identity_texture("Engine/Content/Textures/T.png", payload)
+    texture.location_mode = 4
+    assert resolver.resolve_texture(texture) == sibling.resolve()

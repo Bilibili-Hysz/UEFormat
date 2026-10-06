@@ -257,6 +257,9 @@ class FModelResourceResolver:
         model_parent = self.model_path.resolve(strict=False).parent
         for ancestor in (model_parent, *model_parent.parents):
             if ancestor.name.casefold() == "content":
+                root = ancestor.parent.parent
+                if root != Path(root.anchor):
+                    return root
                 return ancestor
         if PurePosixPath(uri).parts[0] == "..":
             raise ValueError(
@@ -273,7 +276,14 @@ class FModelResourceResolver:
         model_parent = self.model_path.resolve(strict=False).parent
         for ancestor in (model_parent, *model_parent.parents):
             if ancestor.name.casefold() == first_segment:
-                return ancestor.parent
+                return ancestor.parent if ancestor.parent != Path(ancestor.anchor) else None
+        # Sibling mounts (Engine, plugins) live beside the project mount in a
+        # FModel export tree. Only infer this boundary from a Content ancestor.
+        for ancestor in (model_parent, *model_parent.parents):
+            if ancestor.name.casefold() == "content":
+                root = ancestor.parent.parent
+                if root != Path(root.anchor):
+                    return root
         return None
 
     @staticmethod
