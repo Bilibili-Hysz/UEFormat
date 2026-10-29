@@ -11,9 +11,9 @@ from .dto.anim import AnimDto
 from .dto.model import ModelDto
 from .dto.pose import PoseDto
 from .version import EUEFormatVersion
+from .resource_limits import enforce_limit
 
 
-MAX_COMPRESSED_BODY_BYTES = 2 * 1024 * 1024 * 1024
 DECOMPRESSION_CHUNK_BYTES = 1024 * 1024
 
 
@@ -74,8 +74,9 @@ def parse_header(ar: FArchiveReader) -> tuple[UEFormatHeader, FArchiveReader]:
         compression_type = ar.read_fstring()
         uncompressed_size = ar.read_int()
         compressed_size = ar.read_int()
-        if uncompressed_size < 0 or uncompressed_size > MAX_COMPRESSED_BODY_BYTES:
+        if uncompressed_size < 0:
             raise ValueError(f"Invalid uncompressed body size: {uncompressed_size}")
+        enforce_limit(uncompressed_size, "MAX_BYTES", "Uncompressed UEFormat body")
         if compressed_size < 0 or compressed_size != ar.remaining():
             raise ValueError(
                 f"Compressed body size does not match header: {compressed_size} != {ar.remaining()}"

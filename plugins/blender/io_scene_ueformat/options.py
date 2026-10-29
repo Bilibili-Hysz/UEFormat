@@ -55,10 +55,11 @@ class UEAnimOptions(UEFormatOptions):
     rotation_only: bool = False
     import_curves: bool = True
     override_skeleton: Armature | None = None
-    strict_fmodel_skeleton: bool = True
+    # Compatibility with older callers; identity no longer controls binding.
+    strict_fmodel_skeleton: bool = False
 
 @dataclass(slots=True)
 class UEPoseOptions(UEFormatOptions):
     root_bone: str = ""
     override_skeleton: Armature | None = None
-    strict_fmodel_skeleton: bool = True
+    strict_fmodel_skeleton: bool = False

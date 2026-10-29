@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import bpy
@@ -40,15 +39,9 @@ from .extensions.fmodel import (
 )
 from .fmodel_payload import FModelImportPayload
 from .fmodel_v10_adapter import to_runtime_identity, to_runtime_material_links
-from .runtime_fmodel import (
-    plan_fmodel_animation_binding,
-    pose_identity_issues,
-    skeleton_identity_metadata,
-    verify_fmodel_target_pose,
-)
 from .runtime_identity import FModelSkeletonIdentity, compute_skeleton_layout_hash
-from .utils import get_active_armature
 from .wire import UEFormatHeader, parse_body, parse_header
+from .resource_limits import enforce_limit
 
 
 class UEFormatImport:
@@ -68,6 +61,7 @@ class UEFormatImport:
         # V9 identity is decoded only when the explicit migration gate is on.
         # V10 identity remains disabled until its producer contract is frozen.
         self.last_fmodel_identity: FModelIdentityRecord | None = None
+        self.last_fmodel_identity_warnings: list[str] = []
         self.last_fmodel_material_links: FModelMaterialLinksSnapshot | None = None
         self.last_fmodel_textures: FModelTextureSnapshot | None = None
         self.last_fmodel_pbr_interfaces: tuple[FModelPBRInterface, ...] = ()
@@ -132,7 +126,7 @@ class UEFormatImport:
         if isinstance(snapshot, FModelV10ExtensionSnapshot):
             identity_payload = snapshot.get(identity_attribute)
             if identity_payload is not None:
-                identity = decode_v10_identity_chunk(identity_payload, source_kind=source_kind)
+                identity = self._decode_optional_identity(decode_v10_identity_chunk, identity_payload, source_kind)
             materials_payload = snapshot.get(FModelV10Attribute.MATERIALS)
             if materials_payload is not None:
                 materials = decode_v10_material_links(materials_payload)
@@ -145,7 +139,7 @@ class UEFormatImport:
         else:
             identity_chunk = snapshot.get(identity_attribute)
             if identity_chunk is not None:
-                identity = decode_legacy_identity_chunk(identity_chunk, source_kind=source_kind)
+                identity = self._decode_optional_identity(decode_legacy_identity_chunk, identity_chunk, source_kind)
             material_chunk = snapshot.get(FModelV10Attribute.MATERIALS)
             if material_chunk is not None:
                 materials = decode_legacy_material_links(material_chunk)
@@ -181,6 +175,23 @@ class UEFormatImport:
             payload.target_pose_identity = runtime_identity
         return payload
 
+    def _decode_optional_identity(self, decoder, payload, source_kind):
+        collection_warnings = getattr(self.last_fmodel_extensions, "identity_warnings", ())
+        if collection_warnings:
+            self.last_fmodel_identity_warnings.extend(collection_warnings)
+            for warning in collection_warnings:
+                Log.warn(f"Ignoring optional FModel skeleton identity: {warning}")
+            return None
+        try:
+            return decoder(payload, source_kind=source_kind)
+        except ValueError as error:
+            # The raw snapshot remains available. Only optional identity
+            # interpretation is downgraded; standard/material errors propagate.
+            message = f"Ignoring optional FModel skeleton identity: {error}"
+            self.last_fmodel_identity_warnings.append(message)
+            Log.warn(message)
+            return None
+
     @staticmethod
     def _standard_model_identity(dto: ModelDto) -> FModelSkeletonIdentity | None:
         skeleton = dto.skeleton
@@ -199,19 +210,6 @@ class UEFormatImport:
             # optional FModel identity cannot be derived.
             return None
 
-    @staticmethod
-    def _armature_identity(armature: Object) -> dict[str, object] | None:
-        encoded = armature.get("fmodel_skeleton_identity")
-        if encoded is None:
-            return None
-        try:
-            decoded = json.loads(encoded)
-        except (TypeError, ValueError) as error:
-            raise ValueError("FModel armature skeleton identity is malformed") from error
-        if not isinstance(decoded, dict):
-            raise ValueError("FModel armature skeleton identity is malformed")
-        return decoded
-
     def import_file(self, path: str | Path) -> Object | Action | None:
         created, _ = self.import_file_with_dto(path)
         return created
@@ -224,6 +222,7 @@ class UEFormatImport:
             Log.time_start(f"Import {path}")
             self._source_path = path
             try:
+                enforce_limit(path.stat().st_size, "MAX_BYTES", "UEFormat file")
                 with path.open("rb") as file:
                     result = self.import_data_with_dto(file.read())
             finally:
@@ -247,6 +246,7 @@ class UEFormatImport:
     def _import_data_with_dto(
         self, data: bytes,
     ) -> tuple[Object | Action | None, ModelDto | AnimDto | PoseDto]:
+        enforce_limit(len(data), "MAX_BYTES", "UEFormat file")
         with FArchiveReader(data) as ar:
             return self.import_data_by_reader_with_dto(ar)
 
@@ -266,6 +266,7 @@ class UEFormatImport:
     ) -> tuple[Object | Action | None, ModelDto | AnimDto | PoseDto]:
         header, body = parse_header(ar)
         self.last_fmodel_identity = None
+        self.last_fmodel_identity_warnings = []
         self.last_fmodel_material_links = None
         self.last_fmodel_textures = None
         self.last_fmodel_pbr_interfaces = ()
@@ -287,6 +288,7 @@ class UEFormatImport:
                         file_kind,
                         body_bytes,
                         known_standard_attributes=standard_attributes,
+                        tolerate_identity_errors=True,
                     )
             else:
                 self.last_fmodel_extensions = None
@@ -302,6 +304,7 @@ class UEFormatImport:
                 self.last_fmodel_extensions = collect_fmodel_legacy_extensions(
                     file_kind,
                     body_bytes,
+                    tolerate_identity_errors=True,
                 )
             body = FArchiveReader(body_bytes)
             body.file_version = header.file_version
@@ -330,23 +333,12 @@ class UEFormatImport:
             assert isinstance(self.options, UEAnimOptions)
             payload = self._decode_fmodel_payload(FModelV10FileKind.ANIM) if extensions_enabled else None
             target_identity = payload.target_skeleton_identity if payload is not None else None
-            armature = self.options.override_skeleton or get_active_armature()
-            binding_plan = None
-            if target_identity is not None:
-                if not isinstance(armature, bpy.types.Object):
-                    raise ValueError("FModel animation requires an active armature")
-                binding_plan = plan_fmodel_animation_binding(
-                    skeleton_identity_metadata(target_identity),
-                    self._armature_identity(armature),
-                    (track.name for track in dto.tracks),
-                    (bone.name for bone in armature.pose.bones),
-                    strict=self.options.strict_fmodel_skeleton,
-                )
+            # FModel identity is provenance for library indexing. Animation
+            # binding follows upstream UEFormat and does not compare skeletons.
             return create_anim(
                 dto,
                 self.options,
                 header.object_name,
-                binding_plan=binding_plan,
                 target_identity=target_identity,
                 creation_tracker=self.creation_tracker,
             ), dto
@@ -354,26 +346,6 @@ class UEFormatImport:
             assert isinstance(self.options, UEPoseOptions)
             payload = self._decode_fmodel_payload(FModelV10FileKind.POSE) if extensions_enabled else None
             target_identity = payload.target_pose_identity if payload is not None else None
-            if target_identity is not None:
-                armature = self.options.override_skeleton or get_active_armature()
-                if not isinstance(armature, bpy.types.Object):
-                    raise ValueError("FModel pose requires an active armature")
-                issues = pose_identity_issues(
-                    skeleton_identity_metadata(target_identity),
-                    self._armature_identity(armature),
-                )
-                if not issues:
-                    try:
-                        verify_fmodel_target_pose(
-                            skeleton_identity_metadata(target_identity),
-                            self._armature_identity(armature),
-                        )
-                    except ValueError as error:
-                        issues.append(str(error))
-                if issues and self.options.strict_fmodel_skeleton:
-                    raise ValueError("; ".join(issues))
-                for issue in issues:
-                    Log.warn(f"FModel pose compatibility is permissive: {issue}")
             create_pose(
                 dto,
                 self.options,

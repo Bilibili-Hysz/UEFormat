@@ -11,7 +11,7 @@ from unittest import mock
 import zipfile
 
 
-WORKSPACE = Path(__file__).parents[2]
+WORKSPACE = Path(__file__).parents[3]
 HELPER_PATH = WORKSPACE / "scripts" / "sync_release_sources.py"
 
 
@@ -155,7 +155,7 @@ class ReleaseSourceTests(unittest.TestCase):
         helper = load_helper()
         helper.validate_addon_archives(WORKSPACE)
 
-        for archive_path in (WORKSPACE / "io_scene_ueformat.zip", WORKSPACE / "dist" / "io_scene_ueformat.zip"):
+        for archive_path in (WORKSPACE / "io_scene_ueformat.zip", WORKSPACE / "build" / "dist" / "io_scene_ueformat.zip"):
             with self.subTest(archive=archive_path):
                 with zipfile.ZipFile(archive_path) as archive:
                     names = archive.namelist()
@@ -247,7 +247,7 @@ class ReleaseSourceTests(unittest.TestCase):
     def test_archives_match_source_and_each_other(self):
         helper = load_helper()
         root_archive = WORKSPACE / "io_scene_ueformat.zip"
-        dist_archive = WORKSPACE / "dist" / "io_scene_ueformat.zip"
+        dist_archive = WORKSPACE / "build" / "dist" / "io_scene_ueformat.zip"
         self.assertEqual(root_archive.read_bytes(), dist_archive.read_bytes())
         helper.validate_addon_archives(WORKSPACE)
 

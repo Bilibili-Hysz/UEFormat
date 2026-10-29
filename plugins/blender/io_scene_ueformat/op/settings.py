@@ -24,7 +24,7 @@ class UFSettings(PropertyGroup):
 
     rotation_only: BoolProperty(name="Rotation Only", default=False)
     import_curves: BoolProperty(name="Import Curves", default=True)
-    strict_fmodel_skeleton: BoolProperty(name="Strict FModel Skeleton", default=True)
+    strict_fmodel_skeleton: BoolProperty(default=False, options={"HIDDEN"})
     last_import_summary: StringProperty(default="", options={"HIDDEN"})
     last_import_report: StringProperty(default="", options={"HIDDEN"})
     last_import_status: StringProperty(default="", options={"HIDDEN"})

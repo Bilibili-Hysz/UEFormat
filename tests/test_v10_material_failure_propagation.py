@@ -11,8 +11,8 @@ import types
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
-RUNTIME = ROOT / "io_scene_ueformat-fmodel/plugins/blender/io_scene_ueformat"
+ROOT = Path(__file__).resolve().parents[3]
+RUNTIME = ROOT / "src/io_scene_ueformat-fmodel/plugins/blender/io_scene_ueformat"
 
 
 @pytest.fixture
@@ -44,6 +44,25 @@ class _NoIoImages:
         raise AssertionError("Explicitly disabled resources must not be accessed")
     def get_image(self, *args):
         raise AssertionError("Explicitly disabled resources must not be accessed")
+
+
+def test_unmapped_opt_out_uses_same_selection_in_cache_and_builder(material_builder):
+    from io_scene_ueformat.importer.runtime_materials import FModelMaterialParameter, FModelPBRInterface
+    slot = _slot()
+    slot.parameters[0].semantic = 'custom'
+    slot.parameters.insert(0, FModelMaterialParameter('Color', 3, 'base_color', (1, 0, 0, 1)))
+    interfaces = [FModelPBRInterface(0, 0, 1)]
+    options = material_builder.FModelMaterialImportOptions(keep_unmapped=False)
+    mesh = types.SimpleNamespace(uv_layers={'UV0': object()})
+    assert material_builder._material_cache_identity(slot, interfaces, _NoIoImages(), options, mesh)
+    assert material_builder._prevalidate_material(mesh, slot, interfaces, _NoIoImages(), lambda _: None, options)
+
+
+def test_mapped_texture_still_participates_with_unmapped_opt_out(material_builder):
+    from io_scene_ueformat.importer.runtime_materials import FModelPBRInterface
+    options = material_builder.FModelMaterialImportOptions(keep_unmapped=False)
+    with pytest.raises(AssertionError, match='must not be accessed'):
+        material_builder._material_cache_identity(_slot(), [FModelPBRInterface(0, 0, 1)], _NoIoImages(), options)
 
 
 def test_declared_resource_failures_reach_failed_report_and_rollback(tmp_path):

@@ -28,6 +28,7 @@ def collect_fmodel_extensions(
     body: bytes,
     *,
     known_standard_attributes: Iterable[str] = (),
+    tolerate_identity_errors=False,
 ) -> FModelV10ExtensionSnapshot:
     """Collect recognized FModel attributes while preserving skip semantics.
 
@@ -42,6 +43,7 @@ def collect_fmodel_extensions(
     standard = set(known_standard_attributes)
     values: dict[str, bytes] = {}
     unknown: list[str] = []
+    identity_warnings: list[str] = []
 
     for span in scan_attribute_spans(body):
         if span.name in standard:
@@ -52,8 +54,11 @@ def collect_fmodel_extensions(
             unknown.append(span.name)
             continue
         if span.name in values:
+            if tolerate_identity_errors and span.name in {"FMODEL_SKELETON_IDENTITY", "FMODEL_TARGET_SKELETON"}:
+                identity_warnings.append(f"duplicate V10 optional identity attribute: {span.name}")
+                continue
             raise ValueError(f"duplicate FModel V10 extension attribute: {span.name}")
         values[span.name] = payload_for_span(body, span)
 
-    return FModelV10ExtensionSnapshot(file_kind, values, tuple(sorted(set(unknown))))
+    return FModelV10ExtensionSnapshot(file_kind, values, tuple(sorted(set(unknown))), tuple(identity_warnings))
 

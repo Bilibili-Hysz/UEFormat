@@ -9,7 +9,7 @@ import types
 from pathlib import Path
 
 
-WORKSPACE = Path(__file__).resolve().parents[2]
+WORKSPACE = Path(__file__).resolve().parents[3]
 FIXTURE_ROOT = WORKSPACE / "docs" / "archive" / "2026-08-05-retired-v3a-boundary" / "contract-fixtures"
 MANIFEST = FIXTURE_ROOT / "manifest.json"
 REQUIRED_KINDS = {"uemodel", "ueanim", "uepose"}

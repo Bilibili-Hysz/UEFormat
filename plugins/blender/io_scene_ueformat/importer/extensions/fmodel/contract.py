@@ -43,6 +43,7 @@ class FModelV10ExtensionSnapshot:
     file_kind: FModelV10FileKind
     attributes: Mapping[str, bytes]
     unknown_fmodel_attributes: tuple[str, ...] = ()
+    identity_warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))

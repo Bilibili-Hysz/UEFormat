@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import struct
+from ...resource_limits import enforce_limit
 
 
-MAX_ATTRIBUTE_COUNT = 4096
 MAX_ATTRIBUTE_NAME_BYTES = 1024
-MAX_EXTENSION_ATTRIBUTE_BYTES = 64 * 1024 * 1024
 
 
 class FModelV10AttributeError(ValueError):
@@ -60,8 +59,11 @@ def scan_attribute_spans(data: bytes) -> tuple[AttributeSpan, ...]:
     """
 
     count, offset = _read_i32(data, 0, "count")
-    if count < 0 or count > MAX_ATTRIBUTE_COUNT:
+    if count < 0:
         raise FModelV10AttributeError(f"invalid V10 attribute count: {count}")
+    if count > (len(data) - offset) // 8:
+        raise FModelV10AttributeError("truncated V10 attribute envelope")
+    enforce_limit(count, "MAX_ATTRIBUTES", "V10 attributes")
 
     spans: list[AttributeSpan] = []
     for index in range(count):
@@ -81,9 +83,6 @@ def scan_attribute_spans(data: bytes) -> tuple[AttributeSpan, ...]:
 
 
 def payload_for_span(data: bytes, span: AttributeSpan) -> bytes:
-    if span.payload_size > MAX_EXTENSION_ATTRIBUTE_BYTES:
-        raise FModelV10AttributeError(
-            f"V10 extension attribute {span.name} exceeds {MAX_EXTENSION_ATTRIBUTE_BYTES} bytes",
-        )
+    enforce_limit(span.payload_size, "MAX_EXTENSION_BYTES", f"V10 extension {span.name}")
     return data[span.payload_offset:span.payload_offset + span.payload_size]
 

@@ -96,7 +96,7 @@ def build_fmodel_materials(
         if not options.build_nodes:
             _attach_provenance(material, slot, interfaces)
             continue
-        existing = _find_matching_material(slot, interfaces, images, options, material_cache)
+        existing = _find_matching_material(slot, interfaces, images, options, material_cache, mesh)
         if existing is not None:
             mesh.materials[material_index] = existing
             if material.get("fmodel_importer_owned") and material.users == 0:
@@ -106,7 +106,7 @@ def build_fmodel_materials(
             continue
         material = _isolated_build_material(mesh, material_index, material, creation_tracker)
         material.name = f"{_material_display_name(slot)} (FModel)"
-        _attach_provenance(material, slot, interfaces, options, images)
+        _attach_provenance(material, slot, interfaces, options, images, mesh)
         if interfaces:
             _build_v2_material(
                 material, mesh, slot, interfaces, images, warn, options
@@ -115,7 +115,7 @@ def build_fmodel_materials(
             _build_material(material, mesh, slot, images, warn, options)
         if material_cache is not None:
             material_cache[
-                (_material_build_profile(options), _material_cache_identity(slot, interfaces, images, options))
+                (_material_build_profile(options), _material_cache_identity(slot, interfaces, images, options, mesh))
             ] = material
 
 
@@ -217,7 +217,7 @@ def _material_link_metadata(slot, interfaces) -> dict[str, object]:
 
 def _material_build_profile(options) -> str:
     return json.dumps({
-        "implementation_version": 2,
+        "implementation_version": 3,
         "build_nodes": options.build_nodes,
         "load_embedded": options.load_embedded,
         "load_external": options.load_external,
@@ -225,18 +225,30 @@ def _material_build_profile(options) -> str:
     }, separators=(",", ":"), sort_keys=True)
 
 
-def _material_cache_identity(slot, interfaces, images, options=None) -> str:
+def _texture_is_output(parameter, roles, invalid_roles, interfaces, options, mesh=None):
+    """Share the actual texture selection rule between cache and node builders."""
+    if not options.keep_unmapped:
+        if interfaces and not roles and not invalid_roles:
+            return False
+        if not interfaces and parameter.semantic.lower() not in _COLOR_SEMANTICS | _DATA_SEMANTICS:
+            return False
+    mode = parameter.texture.location_mode
+    if (mode == 3 and not options.load_embedded) or (mode in _EXTERNAL_LOCATION_MODES and not options.load_external):
+        return False
+    return mesh is None or mesh.uv_layers.get(f"UV{parameter.texture.uv_set}") is not None
+
+
+def _material_cache_identity(slot, interfaces, images, options=None, mesh=None) -> str:
     options = options or FModelMaterialImportOptions()
-    roles_by_parameter, _ = _v2_roles_by_parameter(slot, interfaces)
+    roles_by_parameter, invalid_roles_by_parameter = _v2_roles_by_parameter(slot, interfaces)
     parameters = []
     for index, parameter in enumerate(slot.parameters):
         if parameter.kind != 1:
             parameters.append((parameter.name, parameter.kind, parameter.semantic, parameter.value))
             continue
-        mode = parameter.texture.location_mode
-        if (mode == 3 and not options.load_embedded) or (mode in _EXTERNAL_LOCATION_MODES and not options.load_external):
-            continue
         roles = roles_by_parameter.get(index, [])
+        if not _texture_is_output(parameter, roles, invalid_roles_by_parameter.get(index, []), interfaces, options, mesh):
+            continue
         interpretations = (
             ("COLOR", "DATA")
             if any(role in {1, 4} for role in roles) and any(role not in {1, 4} for role in roles)
@@ -259,11 +271,11 @@ def _material_cache_identity(slot, interfaces, images, options=None) -> str:
     }, separators=(",", ":"), sort_keys=True)
 
 
-def _find_matching_material(slot, interfaces, images, options, material_cache=None):
+def _find_matching_material(slot, interfaces, images, options, material_cache=None, mesh=None):
     # Declared resources requested by the user must pass integrity checks even
     # when a previously built material could be reused. Never downgrade an
     # invalid URI/missing file/hash failure into a material-cache miss.
-    expected_identity = _material_cache_identity(slot, interfaces, images, options)
+    expected_identity = _material_cache_identity(slot, interfaces, images, options, mesh)
     expected_profile = _material_build_profile(options)
     cache_key = (expected_profile, expected_identity)
     if material_cache is not None:
@@ -285,12 +297,12 @@ def _find_matching_material(slot, interfaces, images, options, material_cache=No
     return None
 
 
-def _attach_provenance(material, slot, interfaces, options=None, images=None) -> None:
+def _attach_provenance(material, slot, interfaces, options=None, images=None, mesh=None) -> None:
     material["fmodel_material_link"] = json.dumps(_material_link_metadata(slot, interfaces))
     if options is not None:
         material["fmodel_material_build_profile"] = _material_build_profile(options)
     if images is not None:
-        material["fmodel_material_cache_identity"] = _material_cache_identity(slot, interfaces, images, options)
+        material["fmodel_material_cache_identity"] = _material_cache_identity(slot, interfaces, images, options, mesh)
     metadata = material_links_metadata(FModelMaterialLinks(slots=[slot], pbr_interfaces=list(interfaces)))
     material["fmodel_parameter_metadata"] = json.dumps([
         parameter for parameter in metadata["slots"][0]["parameters"] if parameter["kind"] in {2, 3}
@@ -326,17 +338,13 @@ def _prevalidate_material(mesh, slot, interfaces, images, warn, options) -> bool
             viable = True
             continue
         semantic = parameter.semantic.lower()
-        if interfaces and roles and not invalid_roles and not options.keep_unmapped:
-            continue
-        if not interfaces and semantic not in {"normal", "base_color", "emissive", "roughness", "metallic", "orm"} and not options.keep_unmapped:
-            continue
-        if interfaces and not roles and not options.keep_unmapped:
-            continue
         if parameter.texture.location_mode == 3 and not options.load_embedded:
             viable = True
             continue
         if parameter.texture.location_mode in _EXTERNAL_LOCATION_MODES and not options.load_external:
             viable = True
+            continue
+        if not _texture_is_output(parameter, roles, invalid_roles, interfaces, options):
             continue
         if mesh.uv_layers.get(f"UV{parameter.texture.uv_set}") is None:
             warn(
@@ -448,6 +456,8 @@ def _build_material(material, mesh, slot, images, warn, options) -> None:
         if parameter.kind != 1:
             continue
         semantic = parameter.semantic.lower()
+        if not _texture_is_output(parameter, [], [], [], options, mesh):
+            continue
         location_mode = parameter.texture.location_mode
         if location_mode == 3 and not options.load_embedded:
             warn(f"FModel texture parameter {parameter.name!r} skipped: embedded textures disabled")
@@ -589,7 +599,7 @@ def _build_v2_material(material, mesh, slot, interfaces, images, warn, options) 
         roles = roles_by_parameter.get(parameter_index, [])
         has_invalid_roles = parameter_index in invalid_roles_by_parameter
         if parameter.kind == 1:
-            if not roles and not has_invalid_roles and not options.keep_unmapped:
+            if not _texture_is_output(parameter, roles, [True] if has_invalid_roles else [], interfaces, options, mesh):
                 continue
             location_mode = parameter.texture.location_mode
             if location_mode == 3 and not options.load_embedded:

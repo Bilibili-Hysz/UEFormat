@@ -372,7 +372,7 @@ def test_archive_reader_rejects_negative_or_unbounded_array_counts() -> None:
     with pytest.raises(ValueError, match="negative array count"):
         FArchiveReader(struct.pack("<i", -1)).read_serialized_array(lambda ar: None)
 
-    with pytest.raises(ValueError, match="exceeds maximum"):
+    with pytest.raises(ValueError, match="exceeds available data"):
         FArchiveReader(struct.pack("<i", 1_000_001)).read_serialized_array(lambda ar: None)
 
 

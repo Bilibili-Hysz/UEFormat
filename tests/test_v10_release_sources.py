@@ -11,7 +11,7 @@ from unittest import mock
 import zipfile
 
 
-WORKSPACE = Path(__file__).parents[2]
+WORKSPACE = Path(__file__).parents[3]
 HELPER_PATH = WORKSPACE / "scripts" / "sync_release_sources.py"
 
 
@@ -68,7 +68,7 @@ class V10ReleaseSourceTests(unittest.TestCase):
             workspace = Path(directory)
             shutil.copytree(WORKSPACE / helper.ADDON_ROOT, workspace / helper.ADDON_ROOT)
             first = workspace / "io_scene_ueformat.zip"
-            second = workspace / "dist" / "io_scene_ueformat.zip"
+            second = workspace / "build" / "dist" / "io_scene_ueformat.zip"
             helper.build_addon_archive(workspace, first)
             helper.build_addon_archive(workspace, second)
 

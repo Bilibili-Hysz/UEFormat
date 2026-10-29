@@ -14,7 +14,7 @@ from ..animation_time import (
     resolve_animation_source_rate,
 )
 from ..creation_tracker import UEFormatImportCapture
-from ..runtime_fmodel import FModelAnimationBindingPlan, skeleton_identity_metadata
+from ..runtime_fmodel import skeleton_identity_metadata
 from ..runtime_identity import FModelTargetSkeletonIdentity
 from ..utils import best, get_active_armature, get_armature_mesh, get_case_insensitive
 
@@ -32,7 +32,6 @@ def create_anim(
     options: UEAnimOptions,
     name: str,
     *,
-    binding_plan: FModelAnimationBindingPlan | None = None,
     target_identity: FModelTargetSkeletonIdentity | None = None,
     creation_tracker: UEFormatImportCapture | None = None,
 ) -> Action:
@@ -91,18 +90,6 @@ def create_anim(
                 separators=(",", ":"),
                 sort_keys=True,
             )
-        if binding_plan is not None:
-            action["fmodel_animation_binding"] = json.dumps(
-                {
-                    "bound_track_count": binding_plan.bound_track_count,
-                    "skipped_track_count": binding_plan.skipped_track_count,
-                    "total_track_count": binding_plan.total_track_count,
-                    "strict": options.strict_fmodel_skeleton,
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-
         render = bpy.context.scene.render
         effective_blender_fps = render.fps / render.fps_base
         source_rate = resolve_animation_source_rate(
@@ -141,16 +128,12 @@ def create_anim(
             armature.animation_data.action_slot = slot
 
         pose_bones = armature.pose.bones
-        for track_index, track in enumerate(dto.tracks):
-            if binding_plan is None:
-                bone = get_case_insensitive(pose_bones, track.name)
-            else:
-                # A None binding is an intentional skip produced by the validated
-                # plan. Never fall back to a second, potentially ambiguous lookup.
-                bound_name = binding_plan.bound_bone_names[track_index]
-                bone = pose_bones.get(bound_name) if bound_name is not None else None
+        bound_track_count = 0
+        for track in dto.tracks:
+            bone = get_case_insensitive(pose_bones, track.name)
             if bone is None:
                 continue
+            bound_track_count += 1
 
             def create_fcurves(data_path: str, count: int, key_count: int, bone: PoseBone) -> list[FCurve]:
                 path = bone.path_from_id(data_path)
@@ -202,6 +185,18 @@ def create_anim(
                 add_key(rot_curves, quat, index, convert_source_tick(key.frame))
 
             bone.matrix_basis.identity()
+
+        action["fmodel_animation_binding"] = json.dumps(
+            {
+                "bound_track_count": bound_track_count,
+                "skipped_track_count": len(dto.tracks) - bound_track_count,
+                "total_track_count": len(dto.tracks),
+                "binding": "ueformat_bone_name",
+                "strict": False,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
 
         if options.import_curves:
             mesh = get_armature_mesh(armature)

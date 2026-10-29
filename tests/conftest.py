@@ -14,8 +14,8 @@ import sys
 from pathlib import Path
 
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-PLUGIN_ROOT = WORKSPACE_ROOT / "io_scene_ueformat-fmodel" / "plugins" / "blender"
+WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+PLUGIN_ROOT = WORKSPACE_ROOT / "src" / "io_scene_ueformat-fmodel" / "plugins" / "blender"
 
 # The V10 tests are intentionally runnable from the aggregate workspace root
 # (``python -m pytest``), not only from a Blender extension install.  Keep the

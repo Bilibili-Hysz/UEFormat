@@ -8,17 +8,13 @@ import numpy as np
 import numpy.typing as npt
 
 from ..version import EUEFormatVersion
+from ..resource_limits import enforce_limit
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import TracebackType
 
 R = TypeVar("R")
-MAX_ARRAY_COUNT = 1_000_000
-# This is a scalar-element bound, not a vertex bound: a normal is four
-# scalars and a large but valid mesh can therefore exceed one million scalar
-# values while remaining well below the archive/resource limits.
-MAX_VECTOR_COUNT = 16_000_000
 
 
 def bytes_to_str(in_bytes: bytes) -> str:
@@ -85,8 +81,7 @@ class FArchiveReader:
     def read_int_vector(self, size: int) -> tuple[int, ...]:
         if size < 0:
             raise ValueError(f"Invalid negative integer vector size: {size}")
-        if size > MAX_VECTOR_COUNT:
-            raise ValueError(f"Integer vector size exceeds maximum {MAX_VECTOR_COUNT}: {size}")
+        enforce_limit(size, "MAX_VECTOR_SCALARS", "Integer vector")
         if size == 0:
             return ()
         return struct.unpack(str(size) + "I", self._read_exact(size * 4, "Integer vector"))
@@ -117,17 +112,15 @@ class FArchiveReader:
     def read_float_vector(self, size: int) -> npt.NDArray[np.floating]:
         if size < 0:
             raise ValueError(f"Invalid negative float vector size: {size}")
-        if size > MAX_VECTOR_COUNT:
-            raise ValueError(f"Float vector size exceeds maximum {MAX_VECTOR_COUNT}: {size}")
+        enforce_limit(size, "MAX_VECTOR_SCALARS", "Float vector")
         if size == 0:
             return np.zeros(0)
-        return np.array(struct.unpack(str(size) + "f", self._read_exact(size * 4, "Float vector")))
+        return np.frombuffer(self._read_exact(size * 4, "Float vector"), dtype="<f4").astype(float)
 
     def read_byte_vector(self, size: int) -> tuple[int, ...]:
         if size < 0:
             raise ValueError(f"Invalid negative byte vector size: {size}")
-        if size > MAX_VECTOR_COUNT:
-            raise ValueError(f"Byte vector size exceeds maximum {MAX_VECTOR_COUNT}: {size}")
+        enforce_limit(size, "MAX_VECTOR_SCALARS", "Byte vector")
         return struct.unpack(str(size) + "B", self._read_exact(size, "Byte vector"))
 
     def skip(self, size: int) -> None:
@@ -144,8 +137,11 @@ class FArchiveReader:
     ) -> list[R]:
         if count < 0:
             raise ValueError(f"Invalid negative array count: {count}")
-        if count > MAX_ARRAY_COUNT:
-            raise ValueError(f"Array count exceeds maximum {MAX_ARRAY_COUNT}: {count}")
+        enforce_limit(count, "MAX_ARRAY_ITEMS", "Serialized array")
+        # Every serialized entry consumes at least one byte. Bound work by
+        # available bytes rather than an arbitrary number of legal entries.
+        if count > self.remaining():
+            raise ValueError("Array count exceeds available data")
         return [predicate(self) for _ in range(count)]
 
     def chunk(self, size: int) -> FArchiveReader:
