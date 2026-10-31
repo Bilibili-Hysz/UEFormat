@@ -54,8 +54,12 @@ def test_unmapped_opt_out_uses_same_selection_in_cache_and_builder(material_buil
     interfaces = [FModelPBRInterface(0, 0, 1)]
     options = material_builder.FModelMaterialImportOptions(keep_unmapped=False)
     mesh = types.SimpleNamespace(uv_layers={'UV0': object()})
+    # One shared rule decides what becomes a texture node, so the cache key and the
+    # node builder cannot disagree: an unmapped texture with no role is rejected,
+    # a mapped one survives.
+    assert not material_builder._texture_is_output(slot.parameters[1], [], [], interfaces, options, mesh)
+    assert material_builder._texture_is_output(slot.parameters[1], [1], [], interfaces, options, mesh)
     assert material_builder._material_cache_identity(slot, interfaces, _NoIoImages(), options, mesh)
-    assert material_builder._prevalidate_material(mesh, slot, interfaces, _NoIoImages(), lambda _: None, options)
 
 
 def test_mapped_texture_still_participates_with_unmapped_opt_out(material_builder):
@@ -63,7 +67,6 @@ def test_mapped_texture_still_participates_with_unmapped_opt_out(material_builde
     options = material_builder.FModelMaterialImportOptions(keep_unmapped=False)
     with pytest.raises(AssertionError, match='must not be accessed'):
         material_builder._material_cache_identity(_slot(), [FModelPBRInterface(0, 0, 1)], _NoIoImages(), options)
-
 
 def test_declared_resource_failures_reach_failed_report_and_rollback(tmp_path):
     output = tmp_path / "product-resource-failure.json"
@@ -76,10 +79,19 @@ def test_declared_resource_failures_reach_failed_report_and_rollback(tmp_path):
     assert len(report["cases"]) == 4
     for case in report["cases"]:
         assert case["resolverRejected"]
-        assert case["operatorStatus"] == "FAILED"
-        assert case["rollbackCalled"]
-        assert not case["failureReportedAsSuccess"]
-        assert case["materialWasNotBuilt"]
+        if case["caseGroup"] == "unavailable":
+            # Linking is auxiliary: absent bytes warn, the material still exists and the
+            # import does not fail or roll back. This harness runs build_nodes=False, so
+            # the warning itself is exercised by the Blender material probe instead.
+            assert case["operatorStatus"] == "SUCCESS", case
+            assert not case["rollbackCalled"], case
+            assert not case["materialWasNotBuilt"], case
+        else:
+            # Integrity failures (hash, length, path escape) must still fail closed.
+            assert case["operatorStatus"] == "FAILED", case
+            assert case["rollbackCalled"], case
+            assert not case["failureReportedAsSuccess"], case
+            assert case["materialWasNotBuilt"], case
 
 
 def test_explicit_external_opt_out_does_not_validate_or_load_files(material_builder):
@@ -87,7 +99,9 @@ def test_explicit_external_opt_out_does_not_validate_or_load_files(material_buil
     slot = _slot()
     images = _NoIoImages()
     mesh = types.SimpleNamespace(uv_layers={})
-    assert material_builder._prevalidate_material(mesh, slot, [], images, lambda _: None, options)
+    # An explicitly disabled external resource is neither validated nor loaded: the
+    # shared selection rule rejects it before any IO, and the cache key stays IO-free.
+    assert not material_builder._texture_is_output(slot.parameters[0], [], [], [], options, mesh)
     assert material_builder._material_cache_identity(slot, [], images, options)
 
 

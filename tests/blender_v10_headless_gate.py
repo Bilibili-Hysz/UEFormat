@@ -157,10 +157,26 @@ try:
         assert any(node.type == "SEPARATE_COLOR" for node in material.node_tree.nodes)
         report["generated_mesh_materials"] = "ok"
 
+        # A later import that meets the same material name must reuse that datablock,
+        # not spawn a second one - this is the plain UEFormat behaviour we keep.
+        reused_created, _, _ = import_fixture(generated_model, export_root=GENERATED)
+        assert reused_created is not None
+        assert reused_created.data.materials[0] is material, (
+            "a same-named material must be reused instead of duplicated"
+        )
+        report["material_name_reuse"] = "ok"
+
         # Standard-only consumption of the same producer bytes: with the
         # extension gate off, the mesh must still import and must not carry
         # any FModel provenance (this is what a Linked-fallback export plus a
         # disabled gate looks like downstream).
+        #
+        # Material names are identities: a later import that meets the same name reuses
+        # the existing datablock, which is the intended UEFormat behaviour. Drop the
+        # materials this run created so this block measures a fresh scene instead of
+        # reusing the FModel-stamped material above.
+        for leftover in [item for item in bpy.data.materials if item.get("fmodel_material_link") is not None]:
+            bpy.data.materials.remove(leftover)
         std_created, std_dto, std_importer = import_fixture(
             generated_model,
             export_root=GENERATED,

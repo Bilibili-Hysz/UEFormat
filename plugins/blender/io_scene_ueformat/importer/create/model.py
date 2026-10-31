@@ -177,14 +177,13 @@ def create_model(
             uv_layer.data.foreach_set("uv", squish(remapped))
 
         if lod.materials:
-            # A material keeps the name the exporter wrote. That makes the name a genuine
-            # identity, so an import without FModel extensions must not adopt a datablock
-            # that a previous FModel import already stamped with FModel provenance.
-            standard_only = fmodel_payload is None or fmodel_payload.material_links is None
+            # Material names are the identity the exporter wrote. A later import that meets
+            # the same name reuses the existing datablock, which is what the plain UEFormat
+            # importer does: one Unreal material maps to one Blender material, however many
+            # meshes reference it. Content is then rebuilt in place by
+            # _isolated_build_material when this importer owns the datablock.
             for i, material in enumerate(lod.materials):
                 mat = bpy.data.materials.get(material.material_name)
-                if standard_only and mat is not None and mat.get("fmodel_material_link") is not None:
-                    mat = None
                 if mat is None:
                     mat = bpy.data.materials.new(name=material.material_name)
                     if creation_tracker is not None:

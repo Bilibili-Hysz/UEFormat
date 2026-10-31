@@ -96,16 +96,29 @@ def build_fmodel_materials(
         if not options.build_nodes:
             _attach_provenance(material, slot, interfaces)
             continue
-        existing = _find_matching_material(slot, interfaces, images, options, material_cache, mesh)
+        try:
+            existing = _find_matching_material(slot, interfaces, images, options, material_cache, mesh)
+        except FileNotFoundError as exc:
+            # A texture that is absent must not block dedupe lookup from falling through
+            # to building the material; integrity errors still propagate.
+            warn(str(exc))
+            existing = None
         if existing is not None:
             mesh.materials[material_index] = existing
             if material.get("fmodel_importer_owned") and material.users == 0:
                 bpy.data.materials.remove(material)
             continue
-        if not _prevalidate_material(mesh, slot, interfaces, images, warn, options):
-            continue
+        # The material itself is the exported result and always gets built. Texture
+        # linking is auxiliary: an unresolvable or unusable texture warns and drops that
+        # one source, it never removes the material or aborts the import.
         material = _isolated_build_material(mesh, material_index, material, creation_tracker)
-        _attach_provenance(material, slot, interfaces, options, images, mesh)
+        try:
+            _attach_provenance(material, slot, interfaces, options, images, mesh)
+        except FileNotFoundError as exc:
+            # Provenance identity needs the declared texture bytes for its cache key.
+            # When they are absent, record the link metadata without the cache identity.
+            warn(str(exc))
+            _attach_provenance(material, slot, interfaces)
         if interfaces:
             _build_v2_material(
                 material, mesh, slot, interfaces, images, warn, options
@@ -309,50 +322,20 @@ def _attach_provenance(material, slot, interfaces, options=None, images=None, me
 
 
 def _isolated_build_material(mesh, material_index, material, creation_tracker=None):
-    """Only single-user importer-owned materials may be rebuilt in place.
+    """Rebuild this importer's own material in place; never overwrite user work.
 
-    A copy keeps the exported material name; Blender appends its own ``.001`` suffix
-    when the name is already taken, which is the honest result of duplicating a
-    material that another object still uses.
+    A same-named material that this importer created earlier is the same Unreal
+    material, so it is reused as one datablock even when several meshes reference it,
+    and its graph is rebuilt from the newest import. A material the user authored is
+    copied first so an import can never silently destroy hand-made nodes.
     """
-    if not material.get("fmodel_importer_owned") or material.users > 1:
+    if not material.get("fmodel_importer_owned"):
         material = material.copy()
         if creation_tracker is not None:
             creation_tracker.track("materials", material)
         mesh.materials[material_index] = material
     material["fmodel_importer_owned"] = True
     return material
-
-
-def _prevalidate_material(mesh, slot, interfaces, images, warn, options) -> bool:
-    """Require one viable source before replacing an importer-owned graph."""
-    roles_by_parameter, invalid_roles_by_parameter = _v2_roles_by_parameter(slot, interfaces, warn)
-    viable = False
-    for index, parameter in enumerate(slot.parameters):
-        roles = roles_by_parameter.get(index, [])
-        invalid_roles = invalid_roles_by_parameter.get(index, [])
-        if parameter.kind != 1:
-            viable = True
-            continue
-        semantic = parameter.semantic.lower()
-        if parameter.texture.location_mode == 3 and not options.load_embedded:
-            viable = True
-            continue
-        if parameter.texture.location_mode in _EXTERNAL_LOCATION_MODES and not options.load_external:
-            viable = True
-            continue
-        if not _texture_is_output(parameter, roles, invalid_roles, interfaces, options):
-            continue
-        if mesh.uv_layers.get(f"UV{parameter.texture.uv_set}") is None:
-            warn(
-                f"FModel texture parameter {parameter.name!r} declares UV{parameter.texture.uv_set}, "
-                "which is missing; skipping texture node to avoid implicit active-UV sampling"
-            )
-            continue
-        interpretation = "COLOR" if (not interfaces and semantic in _COLOR_SEMANTICS) or any(role in {1, 4} for role in roles) else "DATA"
-        if _load_image(parameter, "base_color" if interpretation == "COLOR" else "data", images, warn) is not None:
-            viable = True
-    return viable
 
 
 def _v2_role_accepts_parameter(role: int, kind: int) -> bool:
@@ -464,7 +447,13 @@ def _build_material(material, mesh, slot, images, warn, options) -> None:
             continue
         if semantic not in pbr_semantics and not options.keep_unmapped:
             continue
-        image = _load_image(parameter, semantic, images, warn)
+        try:
+            image = _load_image(parameter, semantic, images, warn)
+        except FileNotFoundError as exc:
+            # Linking is auxiliary: a texture that is simply absent warns and drops that
+            # one source; it never removes the material.
+            warn(str(exc))
+            continue
         if image is None:
             continue
 
@@ -527,7 +516,13 @@ def _load_image(parameter: FModelMaterialParameter, semantic: str, images: FMode
     interpretation = "COLOR" if semantic in _COLOR_SEMANTICS else "DATA"
     try:
         return images.get_image(parameter, interpretation)
+    except FileNotFoundError:
+        # Plain unavailability: the texture simply is not on disk. Linking is auxiliary,
+        # so callers may warn and keep the material.
+        raise
     except (OSError, RuntimeError, ValueError) as exc:
+        # Anything else is an integrity or contract failure (hash mismatch, path escape,
+        # unsupported mode). Those must fail closed and never be downgraded.
         raise ValueError(
             f"FModel texture parameter {parameter.name!r} could not be resolved: {exc}"
         ) from exc
@@ -622,10 +617,10 @@ def _build_v2_material(material, mesh, slot, interfaces, images, warn, options) 
             for interpretation in interpretations:
                 try:
                     image = images.get_image(parameter, interpretation)
-                except (OSError, RuntimeError, ValueError) as exc:
-                    raise ValueError(
-                        f"FModel texture parameter {parameter.name!r} could not be resolved: {exc}"
-                    ) from exc
+                except FileNotFoundError as exc:
+                    # Linking is auxiliary: an absent texture warns and drops this source.
+                    warn(str(exc))
+                    continue
                 source_y = pbr_y if roles else custom_y
                 node = nodes.new("ShaderNodeTexImage")
                 node.name = f"{parameter.name} ({interpretation})"
