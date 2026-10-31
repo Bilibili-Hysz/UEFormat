@@ -177,8 +177,14 @@ def create_model(
             uv_layer.data.foreach_set("uv", squish(remapped))
 
         if lod.materials:
+            # A material keeps the name the exporter wrote. That makes the name a genuine
+            # identity, so an import without FModel extensions must not adopt a datablock
+            # that a previous FModel import already stamped with FModel provenance.
+            standard_only = fmodel_payload is None or fmodel_payload.material_links is None
             for i, material in enumerate(lod.materials):
                 mat = bpy.data.materials.get(material.material_name)
+                if standard_only and mat is not None and mat.get("fmodel_material_link") is not None:
+                    mat = None
                 if mat is None:
                     mat = bpy.data.materials.new(name=material.material_name)
                     if creation_tracker is not None:

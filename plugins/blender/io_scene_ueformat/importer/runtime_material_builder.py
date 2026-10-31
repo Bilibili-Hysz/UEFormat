@@ -105,7 +105,6 @@ def build_fmodel_materials(
         if not _prevalidate_material(mesh, slot, interfaces, images, warn, options):
             continue
         material = _isolated_build_material(mesh, material_index, material, creation_tracker)
-        material.name = f"{_material_display_name(slot)} (FModel)"
         _attach_provenance(material, slot, interfaces, options, images, mesh)
         if interfaces:
             _build_v2_material(
@@ -310,21 +309,19 @@ def _attach_provenance(material, slot, interfaces, options=None, images=None, me
 
 
 def _isolated_build_material(mesh, material_index, material, creation_tracker=None):
-    """Only single-user importer-owned materials may be rebuilt in place."""
+    """Only single-user importer-owned materials may be rebuilt in place.
+
+    A copy keeps the exported material name; Blender appends its own ``.001`` suffix
+    when the name is already taken, which is the honest result of duplicating a
+    material that another object still uses.
+    """
     if not material.get("fmodel_importer_owned") or material.users > 1:
         material = material.copy()
         if creation_tracker is not None:
             creation_tracker.track("materials", material)
-        material.name = f"{material.name} (FModel)"
         mesh.materials[material_index] = material
     material["fmodel_importer_owned"] = True
     return material
-
-
-def _material_display_name(slot) -> str:
-    """Prefer the resolved Unreal material identity over the mesh's legacy slot label."""
-    path = slot.unreal_material_path.replace("\\", "/").rsplit("/", 1)[-1]
-    return path.rsplit(".", 1)[-1] if path else slot.slot_name or "Material"
 
 
 def _prevalidate_material(mesh, slot, interfaces, images, warn, options) -> bool:

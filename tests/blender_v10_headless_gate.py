@@ -121,6 +121,16 @@ try:
         assert len(created.data.polygons) == 1
         assert len(created.data.materials) == 1
         material = created.data.materials[0]
+        # The imported material must carry the name the exporter wrote. Renaming it to
+        # something importer-specific breaks round-trip identity: the same asset imported
+        # through FModel and through a plain UEFormat build would then disagree on names.
+        exported_material_names = [
+            item.material_name for lod in dto.lods for item in lod.materials
+        ]
+        assert material.name in exported_material_names, (
+            f"material name {material.name!r} is not the exported name "
+            f"(expected one of {exported_material_names!r})"
+        )
         assert material.get("fmodel_material_link") is not None
         assert material.node_tree is not None
         principled = next(
