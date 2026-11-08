@@ -157,9 +157,29 @@ try:
         assert "FMODEL_TEXTURES.Orm" in texture_nodes
         assert all(node.image is not None for node in texture_nodes.values())
         assert all(node.image.filepath for node in texture_nodes.values())
+        # A node, a datablock and a path are not the same as pixels. Before this assertion the
+        # gate passed while every image was 0x0 with has_data False, because the resolved
+        # filepath used an 8.3 short name that three different textures share a prefix with.
+        def _image_is_empty(node) -> bool:
+            # bpy_prop_array is not a sequence for membership: `0 in node.image.size` does not
+            # test the numbers, so convert before asking.
+            size = list(node.image.size)
+            return node.image.has_data is False or any(dimension == 0 for dimension in size)
+
+        unloaded = [
+            f"{label}={list(node.image.size)} has_data={node.image.has_data}"
+            for label, node in texture_nodes.items()
+            if _image_is_empty(node)
+        ]
+        assert not unloaded, (
+            "texture nodes exist but carry no pixels: " + "; ".join(unloaded)
+        )
         assert any(node.type == "NORMAL_MAP" for node in material.node_tree.nodes)
         assert any(node.type == "SEPARATE_COLOR" for node in material.node_tree.nodes)
         report["generated_mesh_materials"] = "ok"
+        report["info"]["texture_pixels"] = str(
+            len(texture_nodes)
+        ) + " images loaded with data"
 
         # A later import that meets the same material name must reuse that datablock,
         # not spawn a second one - this is the plain UEFormat behaviour we keep.
