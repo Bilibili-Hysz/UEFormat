@@ -42,9 +42,13 @@ def import_fixture(
 
 
 report: dict[str, object] = {
-    "blender_version": bpy.app.version_string,
-    "generated_root": str(GENERATED),
     "tests": [],
+    # Context lives here so the evaluator needs no heuristics: a top-level key is a verdict
+    # and must equal "ok"; anything under "info" is reported for a human.
+    "info": {
+        "blender_version": bpy.app.version_string,
+        "generated_root": str(GENERATED),
+    },
 }
 
 
@@ -110,7 +114,7 @@ try:
                 "T_FModelV10_Orm.png",
             )
         ]
-        report["generated_files"] = [_record_fixture(path) for path in generated_files]
+        report["info"]["generated_files"] = [_record_fixture(path) for path in generated_files]
         created, dto, importer = import_fixture(
             generated_model,
             export_root=GENERATED,
@@ -258,7 +262,7 @@ try:
             f"imported action has a flat frame range [{start}, {end}]; keys were dropped"
         )
     report["animated_tracks"] = "ok"
-    report["animated_frames"] = f"{start:.0f}-{end:.0f}"
+    report["info"]["animated_frames"] = f"{start:.0f}-{end:.0f}"
 
     # The shipped .uepose carries zero pose entries, so it proves the header and the identity
     # chunk survive and nothing about decoding pose keys or curve influences.
@@ -287,7 +291,35 @@ try:
             + "; ".join(rich_pose_importer.last_fmodel_identity_warnings)
         )
     report["pose_payload"] = "ok"
-    report["pose_bones"] = str(len(rich_pose_dto.poses[0].keys))
+    report["info"]["pose_bones"] = str(len(rich_pose_dto.poses[0].keys))
+
+    # Every other mesh fixture is a single triangle, so the import path has never carried a
+    # real vertex count. fmodel_large_grid.uemodel is a 130x130 grid: 16,900 vertices and
+    # 33,282 triangles. Scale is where index handling, per-vertex arrays and mesh construction
+    # actually fail, and none of the small fixtures can show it.
+    large_path = FIXTURES / "fmodel_large_grid.uemodel"
+    if not large_path.is_file():
+        raise AssertionError(
+            f"required large fixture is missing: {large_path} "
+            "(regenerate with scripts/make_large_model_fixture.py)"
+        )
+    large_created, large_dto, large_importer = import_fixture(large_path)
+    if large_created is None or large_created.type != "MESH":
+        raise AssertionError("large fixture did not import as a mesh")
+    large_vertices = len(large_created.data.vertices)
+    large_polygons = len(large_created.data.polygons)
+    if large_vertices != 16900:
+        raise AssertionError(f"large fixture produced {large_vertices} vertices, expected 16900")
+    if large_polygons != 33282:
+        raise AssertionError(f"large fixture produced {large_polygons} polygons, expected 33282")
+    if len(large_created.data.loops) != 99846:
+        raise AssertionError(
+            f"large fixture produced {len(large_created.data.loops)} loops, expected 99846"
+        )
+    if len(large_created.material_slots) != 2:
+        raise AssertionError("large fixture did not keep both material slots")
+    report["large_mesh"] = "ok"
+    report["info"]["large_vertices"] = str(large_vertices)
 
     # The core promise covers .ueanim and .uepose as much as .uemodel, but this gate only
     # imported meshes. Their unit tests stub bpy, so nothing proved the two formats reach a
@@ -330,7 +362,7 @@ try:
     if not anim_identity.get("skeleton_path"):
         raise AssertionError(".ueanim identity carries no skeleton_path")
     report["ueanim_target_skeleton"] = "ok"
-    report["ueanim_identity_path"] = anim_identity["skeleton_path"]
+    report["info"]["ueanim_identity_path"] = anim_identity["skeleton_path"]
 
     pose_path = FIXTURES / "fmodel_target_skeleton.uepose"
     if not pose_path.is_file():
@@ -360,7 +392,7 @@ try:
     if not pose_identity.get("skeleton_path"):
         raise AssertionError(".uepose identity carries no skeleton_path")
     report["uepose_target_skeleton"] = "ok"
-    report["uepose_identity_path"] = pose_identity["skeleton_path"]
+    report["info"]["uepose_identity_path"] = pose_identity["skeleton_path"]
 finally:
     io_scene_ueformat.unregister()
 
