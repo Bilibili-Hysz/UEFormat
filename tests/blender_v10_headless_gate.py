@@ -260,6 +260,35 @@ try:
     report["animated_tracks"] = "ok"
     report["animated_frames"] = f"{start:.0f}-{end:.0f}"
 
+    # The shipped .uepose carries zero pose entries, so it proves the header and the identity
+    # chunk survive and nothing about decoding pose keys or curve influences.
+    # fmodel_pose_contact.uepose carries one entry with four bones, two curve influences and
+    # three curve names.
+    rich_pose_path = FIXTURES / "fmodel_pose_contact.uepose"
+    if not rich_pose_path.is_file():
+        raise AssertionError(f"required pose fixture is missing: {rich_pose_path}")
+    rich_pose_importer = UEFormatImport(UEPoseOptions(link=True, enable_fmodel_extensions=True))
+    rich_pose_created, rich_pose_dto = rich_pose_importer.import_file_with_dto(rich_pose_path)
+    if rich_pose_created is not None:
+        raise AssertionError(".uepose import should apply in place and return None")
+    if len(rich_pose_dto.poses) < 1:
+        raise AssertionError("pose fixture decoded no pose entries")
+    if len(rich_pose_dto.poses[0].keys) < 4:
+        raise AssertionError(
+            f"pose entry carries {len(rich_pose_dto.poses[0].keys)} bone keys, expected at least 4"
+        )
+    if len(rich_pose_dto.poses[0].curves) < 2:
+        raise AssertionError("pose entry carries fewer than two curve influences")
+    if len(rich_pose_dto.curve_names) < 3:
+        raise AssertionError("pose fixture decoded fewer than three curve names")
+    if not rich_pose_importer.last_fmodel_identity_warnings == []:
+        raise AssertionError(
+            "pose identity was rejected: "
+            + "; ".join(rich_pose_importer.last_fmodel_identity_warnings)
+        )
+    report["pose_payload"] = "ok"
+    report["pose_bones"] = str(len(rich_pose_dto.poses[0].keys))
+
     # The core promise covers .ueanim and .uepose as much as .uemodel, but this gate only
     # imported meshes. Their unit tests stub bpy, so nothing proved the two formats reach a
     # real Blender scene with FMODEL_TARGET_SKELETON intact.
