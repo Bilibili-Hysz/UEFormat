@@ -7,6 +7,7 @@ import bpy
 from bpy.types import EditBone, Object
 from mathutils import Matrix, Quaternion, Vector
 
+from ...logging import Log
 from ...options import UEModelOptions
 from ..dto.model import ModelDto
 from ..fmodel_payload import FModelImportPayload
@@ -64,6 +65,17 @@ def create_skeleton(
             bone_pos = Vector(bone_.position)
             bone_rot = _xyzw_to_quat(bone_.rotation)
             bone_scale = Vector(bone_.scale)
+
+            # A quaternion of length zero is not a rotation. Left as-is it becomes orig_quat and
+            # post_quat, and create_anim multiplies both into every rotation key, so the whole
+            # rotation channel imports as zeros while location and scale animate normally - a silent
+            # failure with no diagnostic. Treat it as identity and say so.
+            if bone_rot.magnitude < 1e-8:
+                Log.warn(
+                    f"Bone {bone_.name!r} declares a zero rotation quaternion; using identity. "
+                    "Animation rotation keys for this bone would otherwise be zeroed."
+                )
+                bone_rot = Quaternion()
 
             edit_bone = edit_bones.new(bone_.name)
             edit_bone["orig_loc"] = bone_pos

@@ -366,19 +366,19 @@ try:
     armature = created
     bpy.context.view_layer.objects.active = armature
 
-    # The skeleton fixture stores an all-zero rotation on its bone. skeleton.py derives orig_quat and
-    # post_quat from it, and create_anim multiplies both into every rotation key, so rotation curves
-    # import as zeros while location and scale animate normally. The fixture is a committed binary
-    # with no generator, so repair the properties here rather than hand-editing its layout.
-    from mathutils import Quaternion as _Quaternion
-
-    for pose_bone in armature.pose.bones:
-        stored = pose_bone.bone.get("orig_quat")
-        if stored is not None and all(abs(value) < 1e-9 for value in stored):
-            pose_bone.bone["orig_quat"] = _Quaternion()
-        stored = pose_bone.bone.get("post_quat")
-        if stored is not None and all(abs(value) < 1e-9 for value in stored):
-            pose_bone.bone["post_quat"] = _Quaternion()
+    # The skeleton fixture stores an all-zero rotation on its bone. skeleton.py detects that, warns and
+    # substitutes identity, so no repair is needed here - and if that guard is ever removed, the
+    # rotation assertion below must fail rather than be masked by a workaround.
+    zero_basis = [
+        pose_bone.name
+        for pose_bone in armature.pose.bones
+        if all(abs(value) < 1e-9 for value in pose_bone.bone.get("orig_quat", ()))
+    ]
+    if zero_basis:
+        raise AssertionError(
+            f"bones still carry a zero orig_quat after import: {zero_basis}; "
+            "skeleton.py must repair and warn instead of passing it through"
+        )
 
     rich_path = FIXTURES / "fmodel_animated_walk.ueanim"
     if not rich_path.is_file():
