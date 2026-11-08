@@ -22,6 +22,7 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 import io_scene_ueformat  # noqa: E402
 from io_scene_ueformat.importer.import_context import UEFormatImport  # noqa: E402
 from io_scene_ueformat.options import UEModelOptions  # noqa: E402
+from io_scene_ueformat.importer.utils import get_armature_mesh  # noqa: E402
 
 
 def import_fixture(
@@ -475,6 +476,40 @@ try:
             f"armature has {sorted(armature_bones)}"
         )
     report["pose_binding"] = "ok"
+    # Binding is necessary but not sufficient: create_pose skips every key whose bone hierarchy has
+    # no vertex groups, and this skeleton fixture carries no skin weights, so the pose binds and then
+    # changes nothing. The pose lands as a shape key named after it. Give the bone a vertex group so
+    # the pose has a surface to deform, then require the shape key.
+    pose_mesh = get_armature_mesh(armature)
+    if pose_mesh is None:
+        raise AssertionError("could not resolve the armature mesh for the pose check")
+    if not any(modifier.type == "ARMATURE" for modifier in pose_mesh.modifiers):
+        armature_modifier = pose_mesh.modifiers.new(name="Armature", type="ARMATURE")
+        armature_modifier.object = armature
+    for bone_name in {key.bone_name for key in rich_pose_dto.poses[0].keys}:
+        group = pose_mesh.vertex_groups.get(bone_name) or pose_mesh.vertex_groups.new(
+            name=bone_name
+        )
+        group.add(list(range(len(pose_mesh.data.vertices))), 1.0, "REPLACE")
+
+    shape_keys_before = (
+        [block.name for block in pose_mesh.data.shape_keys.key_blocks]
+        if pose_mesh.data.shape_keys else []
+    )
+    applied_importer = UEFormatImport(UEPoseOptions(link=True, enable_fmodel_extensions=True))
+    applied_importer.import_file_with_dto(rich_pose_path)
+    shape_keys_after = (
+        [block.name for block in pose_mesh.data.shape_keys.key_blocks]
+        if pose_mesh.data.shape_keys else []
+    )
+    pose_name = rich_pose_dto.poses[0].name
+    if pose_name not in shape_keys_after:
+        raise AssertionError(
+            f"pose {pose_name!r} produced no shape key; before={shape_keys_before} "
+            f"after={shape_keys_after} - the pose imported but changed nothing"
+        )
+    report["pose_applied"] = "ok"
+    report["info"]["pose_shape_keys"] = str(shape_keys_after)
 
     # Every other mesh fixture is a single triangle, so the import path has never carried a
     # real vertex count. fmodel_large_grid.uemodel is a 130x130 grid: 16,900 vertices and
@@ -560,7 +595,6 @@ try:
         raise AssertionError(
             f".uepose import returned {pose_created!r}; it should apply in place"
         )
-    from io_scene_ueformat.importer.utils import get_armature_mesh
 
     pose_mesh = get_armature_mesh(armature)
     if pose_mesh is None:
