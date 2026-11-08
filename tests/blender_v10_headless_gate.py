@@ -229,6 +229,57 @@ try:
     assert created.get("fmodel_skeleton_identity") is not None
     report["legacy_v9_identity"] = "ok"
 
+    # The v9 mesh fixtures also carry scalar and vector parameters, and the v1 builder used to
+    # drop them: only kind == 1 (texture) survived the loop, so Principled kept its default
+    # roughness while fmodel_parameter_metadata recorded 0.25.
+    # Only fmodel_golden takes the v1 builder: it has no FMODEL_PBR_INTERFACES, so the dispatch
+    # selects _build_material. fmodel_v2_deployment carries the chunk and takes the v2 builder,
+    # which emits a value node only when an interface role points at the parameter - it has no
+    # Roughness interface, so checking it there would assert the wrong contract.
+    for fixture_name, expected_roughness in (("fmodel_golden.uemodel", 0.25),):
+        param_created, _, _ = import_fixture(FIXTURES / fixture_name)
+        if param_created is None:
+            raise AssertionError(f"{fixture_name} did not import")
+        checked = False
+        for slot in param_created.material_slots:
+            material = slot.material
+            if material is None or material.node_tree is None:
+                continue
+            principled = next(
+                (node for node in material.node_tree.nodes
+                 if node.type == "BSDF_PRINCIPLED"),
+                None,
+            )
+            if principled is None:
+                continue
+            value_nodes = {
+                node.name: node
+                for node in material.node_tree.nodes
+                if node.type in {"VALUE", "RGB"}
+            }
+            if "Roughness" not in value_nodes:
+                continue
+            checked = True
+            observed = round(principled.inputs["Roughness"].default_value, 4)
+            if observed != expected_roughness:
+                raise AssertionError(
+                    f"{fixture_name}: Roughness parameter is {expected_roughness}, but the "
+                    f"Principled socket reads {observed}"
+                )
+            if "Tint" not in value_nodes:
+                raise AssertionError(
+                    f"{fixture_name}: Tint vector parameter produced no RGB node"
+                )
+        if not checked:
+            raise AssertionError(
+                f"{fixture_name}: no material received a Roughness value node; scalar and "
+                "vector parameters are being dropped again"
+            )
+    report["material_parameters"] = "ok"
+    report["info"]["parameter_roughness"] = "0.25 applied"
+
+
+
     # The two v9 mesh fixtures were never imported here, and a legacy-only crash lived in that
     # gap: the material builder read a field MaterialDto does not declare, so every v9 file
     # raised AttributeError while this gate stayed green - it only ever imported v10 meshes and

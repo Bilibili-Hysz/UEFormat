@@ -509,6 +509,50 @@ def _build_material(material, mesh, slot, images, warn, options) -> None:
         else:
             custom_y -= source_spacing
 
+    # Scalar and vector parameters carry real values - Roughness 0.25, Tint (0.1, 0.2, 0.3) - and
+    # the texture loop above skips every one of them because it tests kind != 1. Real exports
+    # always reach this function: the dispatch keys on FMODEL_PBR_INTERFACES, which the V10
+    # contract forbids the producer from writing, so the v2 builder that does handle values never
+    # runs. Without this pass the numbers sit in fmodel_parameter_metadata and never reach a
+    # socket: the imported material keeps Principled's default roughness.
+    _PRINCIPLED_SOCKETS = {
+        "roughness": "Roughness",
+        "metallic": "Metallic",
+        "specular": "Specular IOR Level",
+        "base_color": "Base Color",
+        "emissive": "Emission Color",
+    }
+    value_y = pbr_y
+    for parameter in slot.parameters:
+        if parameter.kind == 1:
+            continue
+        semantic = (parameter.semantic or "").lower()
+        node = nodes.new("ShaderNodeValue" if parameter.kind == 2 else "ShaderNodeRGB")
+        node.name = parameter.name
+        node.label = parameter.name
+        node.parent = frame_for(semantic)
+        node.location = (0, value_y)
+        value_y -= 140
+        try:
+            if parameter.kind == 2:
+                _socket_by_identifier(node.outputs, "Value").default_value = parameter.value
+            else:
+                _socket_by_identifier(node.outputs, "Color").default_value = parameter.value
+        except (TypeError, ValueError) as error:
+            warn(f"FModel parameter {parameter.name!r} has an unusable value: {error}")
+            continue
+
+        socket_name = _PRINCIPLED_SOCKETS.get(semantic)
+        if socket_name is None or socket_name not in principled.inputs:
+            # No socket to drive, but the node still carries the value so nothing is lost.
+            continue
+        if parameter.kind == 2:
+            principled.inputs[socket_name].default_value = parameter.value
+        else:
+            links.new(node.outputs["Color"], principled.inputs[socket_name])
+            if semantic == "emissive" and "Emission Strength" in principled.inputs:
+                principled.inputs["Emission Strength"].default_value = 1.0
+
     # Re-enable frame auto-sizing only after all absolute/local node positions have
     # been assigned. Setting shrink=True before parenting is what caused older
     # Blender builds to collapse the recovered layout into overlapping nodes.
