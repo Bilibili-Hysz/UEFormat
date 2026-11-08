@@ -66,10 +66,13 @@ def build_fmodel_materials(
     if not options.import_materials:
         return
     if source_slot_to_blender_index is None:
+        # MaterialDto carries no source slot number: the dense MATERIALS array is ordered, so
+        # a material's position in it is its index. The previous code read
+        # material.source_slot_index, a field the DTO never had, so every legacy import raised
+        # AttributeError - only the V10 path supplies an explicit map and skips this fallback.
         source_slot_to_blender_index = {
-            material.source_slot_index: blender_index
-            for blender_index, material in enumerate(lod_materials)
-            if material.source_slot_index is not None
+            blender_index: blender_index
+            for blender_index, _material in enumerate(lod_materials)
         }
     source_slot_to_blender_index = _source_slot_to_blender_indices(
         material_links.slots,
@@ -182,10 +185,10 @@ def source_slot_mapping_for_lod_materials(lod_materials, material_links) -> dict
     ``MATERIALS`` entry.  Falling back to ``slot_index`` preserves v1 and v2
     records that do not carry an original source index.
     """
+    # Same correction: index by position, not by a field that does not exist.
     dense_by_source = {
-        material.source_slot_index: blender_index
-        for blender_index, material in enumerate(lod_materials)
-        if material.source_slot_index is not None
+        blender_index: blender_index
+        for blender_index, _material in enumerate(lod_materials)
     }
     mapping: dict[int, int] = {}
     for slot in material_links.slots:
