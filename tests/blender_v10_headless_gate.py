@@ -370,9 +370,16 @@ try:
         raise AssertionError(f"required animation fixture is missing: {rich_path}")
     rich_importer = UEFormatImport(UEAnimOptions(link=True, enable_fmodel_extensions=True))
     rich_action, rich_dto = rich_importer.import_file_with_dto(rich_path)
-    if len(rich_dto.tracks) < 3:
+    # One track is the legal shape: an exporter emits one track per bone, and asking for several
+    # tracks on the same bone makes the importer raise "F-Curve already exists". What makes the
+    # fixture worth having is the key count per channel and that every key binds.
+    if len(rich_dto.tracks) < 1:
+        raise AssertionError("animated fixture decoded no tracks")
+    first_track = rich_dto.tracks[0]
+    if min(len(first_track.position_keys), len(first_track.rotation_keys),
+           len(first_track.scale_keys)) < 3:
         raise AssertionError(
-            f"animated fixture decoded {len(rich_dto.tracks)} tracks, expected at least 3"
+            "animated fixture's track carries fewer than three keys per channel"
         )
     if len(rich_dto.curves) < 2:
         raise AssertionError(
@@ -387,6 +394,49 @@ try:
         )
     report["animated_tracks"] = "ok"
     report["info"]["animated_frames"] = f"{start:.0f}-{end:.0f}"
+    # A track that names a bone the armature does not have binds to nothing: the counts still look
+    # right, the Action still has curves, and nothing animates. Assert the binding.
+    armature_bones = {bone.name for bone in armature.data.bones}
+    unbound_tracks = [
+        track.name for track in rich_dto.tracks if track.name not in armature_bones
+    ]
+    if unbound_tracks:
+        raise AssertionError(
+            f"animation tracks name bones the armature lacks: {unbound_tracks}; "
+            f"armature has {sorted(armature_bones)}"
+        )
+
+    bound_paths: set[str] = set()
+    layers = getattr(rich_action, "layers", None)
+    if layers:
+        for layer in layers:
+            for strip in getattr(layer, "strips", []):
+                bag = getattr(strip, "channelbag", None)
+                if not callable(bag):
+                    continue
+                for slot in getattr(rich_action, "slots", []):
+                    try:
+                        handle = bag(slot)
+                    except Exception:
+                        continue
+                    if handle is not None:
+                        bound_paths.update(fcurve.data_path for fcurve in handle.fcurves)
+    if hasattr(rich_action, "fcurves"):
+        bound_paths.update(fcurve.data_path for fcurve in rich_action.fcurves)
+    referenced_bones = {
+        path.split('"')[1] for path in bound_paths if path.startswith('pose.bones["')
+    }
+    if not referenced_bones:
+        raise AssertionError(
+            "the imported Action has no fcurve addressing a pose bone; the keys did not bind"
+        )
+    if not referenced_bones <= armature_bones:
+        raise AssertionError(
+            f"Action fcurves address bones the armature lacks: "
+            f"{sorted(referenced_bones - armature_bones)}"
+        )
+    report["animated_binding"] = "ok"
+    report["info"]["animated_bound_bones"] = str(sorted(referenced_bones))
 
     # The shipped .uepose carries zero pose entries, so it proves the header and the identity
     # chunk survive and nothing about decoding pose keys or curve influences.
@@ -416,6 +466,15 @@ try:
         )
     report["pose_payload"] = "ok"
     report["info"]["pose_bones"] = str(len(rich_pose_dto.poses[0].keys))
+    # The same gap on the pose side: keys naming unknown bones are silently dropped.
+    pose_bones = {key.bone_name for key in rich_pose_dto.poses[0].keys}
+    unbound_pose = sorted(pose_bones - armature_bones)
+    if unbound_pose:
+        raise AssertionError(
+            f"pose keys name bones the armature lacks: {unbound_pose}; "
+            f"armature has {sorted(armature_bones)}"
+        )
+    report["pose_binding"] = "ok"
 
     # Every other mesh fixture is a single triangle, so the import path has never carried a
     # real vertex count. fmodel_large_grid.uemodel is a 130x130 grid: 16,900 vertices and
