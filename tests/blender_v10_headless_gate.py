@@ -228,6 +228,38 @@ try:
             )
     report["legacy_v9_meshes"] = "ok"
 
+    # The one shipped .ueanim carries a single bone, a single frame and zero tracks, so it
+    # proves the header and the FMODEL_TARGET_SKELETON chunk survive - nothing about curve
+    # decoding. fmodel_animated_walk.ueanim carries three bone tracks with three keys each and
+    # two float curves, so the track and curve paths are exercised for real.
+    from io_scene_ueformat.options import UEAnimOptions, UEPoseOptions  # noqa: E402
+
+    armature = created
+    bpy.context.view_layer.objects.active = armature
+
+    rich_path = FIXTURES / "fmodel_animated_walk.ueanim"
+    if not rich_path.is_file():
+        raise AssertionError(f"required animation fixture is missing: {rich_path}")
+    rich_importer = UEFormatImport(UEAnimOptions(link=True, enable_fmodel_extensions=True))
+    rich_action, rich_dto = rich_importer.import_file_with_dto(rich_path)
+    if len(rich_dto.tracks) < 3:
+        raise AssertionError(
+            f"animated fixture decoded {len(rich_dto.tracks)} tracks, expected at least 3"
+        )
+    if len(rich_dto.curves) < 2:
+        raise AssertionError(
+            f"animated fixture decoded {len(rich_dto.curves)} curves, expected at least 2"
+        )
+    if rich_dto.metadata.num_frames < 2:
+        raise AssertionError("animated fixture decoded fewer than two frames")
+    start, end = rich_action.frame_range
+    if end <= start:
+        raise AssertionError(
+            f"imported action has a flat frame range [{start}, {end}]; keys were dropped"
+        )
+    report["animated_tracks"] = "ok"
+    report["animated_frames"] = f"{start:.0f}-{end:.0f}"
+
     # The core promise covers .ueanim and .uepose as much as .uemodel, but this gate only
     # imported meshes. Their unit tests stub bpy, so nothing proved the two formats reach a
     # real Blender scene with FMODEL_TARGET_SKELETON intact.
