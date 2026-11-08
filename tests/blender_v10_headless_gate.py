@@ -366,6 +366,20 @@ try:
     armature = created
     bpy.context.view_layer.objects.active = armature
 
+    # The skeleton fixture stores an all-zero rotation on its bone. skeleton.py derives orig_quat and
+    # post_quat from it, and create_anim multiplies both into every rotation key, so rotation curves
+    # import as zeros while location and scale animate normally. The fixture is a committed binary
+    # with no generator, so repair the properties here rather than hand-editing its layout.
+    from mathutils import Quaternion as _Quaternion
+
+    for pose_bone in armature.pose.bones:
+        stored = pose_bone.bone.get("orig_quat")
+        if stored is not None and all(abs(value) < 1e-9 for value in stored):
+            pose_bone.bone["orig_quat"] = _Quaternion()
+        stored = pose_bone.bone.get("post_quat")
+        if stored is not None and all(abs(value) < 1e-9 for value in stored):
+            pose_bone.bone["post_quat"] = _Quaternion()
+
     rich_path = FIXTURES / "fmodel_animated_walk.ueanim"
     if not rich_path.is_file():
         raise AssertionError(f"required animation fixture is missing: {rich_path}")
@@ -436,6 +450,19 @@ try:
             f"Action fcurves address bones the armature lacks: "
             f"{sorted(referenced_bones - armature_bones)}"
         )
+    # A rotation channel whose keys are all zero is present but animates nothing. Sample the bone at
+    # the ends of the range and require the rotation to differ.
+    sampled = []
+    for frame in (int(start), int(end)):
+        bpy.context.scene.frame_set(frame)
+        bpy.context.view_layer.update()
+        sampled.append(tuple(round(v, 5) for v in armature.pose.bones[0].rotation_quaternion))
+    if len(set(sampled)) < 2:
+        raise AssertionError(
+            f"rotation does not animate: both ends of the range read {sampled[0]}; "
+            "the rotation keys carry the same value"
+        )
+    report["animated_rotation"] = "ok"
     report["animated_binding"] = "ok"
     report["info"]["animated_bound_bones"] = str(sorted(referenced_bones))
 
