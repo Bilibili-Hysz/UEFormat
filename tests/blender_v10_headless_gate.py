@@ -189,6 +189,59 @@ try:
             "a same-named material must be reused instead of duplicated"
         )
         report["material_name_reuse"] = "ok"
+        # The requirement covers a later import of a DIFFERENT model that shares a material name,
+        # not just re-importing the same file. Check both, plus that a datablock the importer did
+        # not create is left alone - the importer owns what it built, not what a user made.
+        cross_created, _, _ = import_fixture(FIXTURES / "fmodel_v2_deployment.uemodel")
+        assert cross_created is not None, "cross-file reuse fixture did not import"
+        cross_materials = [slot.material for slot in cross_created.material_slots if slot.material]
+        assert cross_materials, "cross-file import produced no materials"
+        golden = [item for item in bpy.data.materials if item.name.startswith("M_Golden")]
+        assert len(golden) == 2, (
+            f"a second file with the same material names produced {len(golden)} datablocks, "
+            "expected 2 - materials are being duplicated instead of reused"
+        )
+        assert all(material in golden for material in cross_materials), (
+            "cross-file import created a material that is not one of the shared datablocks"
+        )
+
+        # A collision has to use the name the fixture declares, otherwise the importer never looks
+        # it up and the assertion proves nothing. Remove the importer-owned M_GoldenBody first, then
+        # put a user-authored material under that exact name.
+        for owned in [item for item in bpy.data.materials
+                      if item.name.startswith("M_GoldenBody")]:
+            bpy.data.materials.remove(owned)
+        user_material = bpy.data.materials.new("M_GoldenBody")
+        user_material["authored_by"] = "user"
+        user_material.use_nodes = True
+        user_material.node_tree.nodes.clear()
+        marker_node = user_material.node_tree.nodes.new("ShaderNodeValue")
+        marker_node.name = "USER_MARKER"
+        user_node_count = len(user_material.node_tree.nodes)
+
+        collided, _, _ = import_fixture(FIXTURES / "fmodel_golden.uemodel")
+        assert collided is not None, "collision import failed"
+        survivor = bpy.data.materials.get("M_GoldenBody")
+        assert survivor is not None, "the importer removed a user-authored material"
+        assert survivor.get("authored_by") == "user", (
+            "the importer consumed the user's M_GoldenBody datablock instead of copying it"
+        )
+        assert survivor.node_tree.nodes.get("USER_MARKER") is not None, (
+            "the importer destroyed a node in the user-authored M_GoldenBody"
+        )
+        assert len(survivor.node_tree.nodes) == user_node_count, (
+            "the importer rebuilt the user-authored M_GoldenBody node tree"
+        )
+        imported = [slot.material for slot in collided.material_slots if slot.material]
+        assert all(material is not survivor for material in imported), (
+            "the imported mesh is bound to the user's datablock instead of its own copy"
+        )
+        assert all(material.get("fmodel_importer_owned") for material in imported), (
+            "the imported materials are not marked as importer-owned"
+        )
+
+        report["material_reuse_scope"] = "ok"
+        report["info"]["material_datablocks"] = str(len(golden))
 
         # Standard-only consumption of the same producer bytes: with the
         # extension gate off, the mesh must still import and must not carry
