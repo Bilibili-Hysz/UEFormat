@@ -205,6 +205,29 @@ try:
     assert created.get("fmodel_skeleton_identity") is not None
     report["legacy_v9_identity"] = "ok"
 
+    # The two v9 mesh fixtures were never imported here, and a legacy-only crash lived in that
+    # gap: the material builder read a field MaterialDto does not declare, so every v9 file
+    # raised AttributeError while this gate stayed green - it only ever imported v10 meshes and
+    # the one v9 armature above, none of which reach the material fallback. Import them and
+    # require real geometry plus material slots.
+    for fixture_name, expected_slots in (
+        ("fmodel_golden.uemodel", 2),
+        ("fmodel_v2_deployment.uemodel", 2),
+    ):
+        legacy_created, legacy_dto, legacy_importer = import_fixture(FIXTURES / fixture_name)
+        if legacy_created is None or legacy_created.type != "MESH":
+            raise AssertionError(f"{fixture_name} did not import as a mesh")
+        if len(legacy_created.data.vertices) == 0:
+            raise AssertionError(f"{fixture_name} imported with no vertices")
+        if len(legacy_created.data.polygons) == 0:
+            raise AssertionError(f"{fixture_name} imported with no polygons")
+        if len(legacy_created.material_slots) != expected_slots:
+            raise AssertionError(
+                f"{fixture_name} produced {len(legacy_created.material_slots)} material "
+                f"slots, expected {expected_slots}"
+            )
+    report["legacy_v9_meshes"] = "ok"
+
     # The core promise covers .ueanim and .uepose as much as .uemodel, but this gate only
     # imported meshes. Their unit tests stub bpy, so nothing proved the two formats reach a
     # real Blender scene with FMODEL_TARGET_SKELETON intact.
