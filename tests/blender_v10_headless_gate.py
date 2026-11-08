@@ -204,6 +204,79 @@ try:
     assert created.type == "ARMATURE"
     assert created.get("fmodel_skeleton_identity") is not None
     report["legacy_v9_identity"] = "ok"
+
+    # The core promise covers .ueanim and .uepose as much as .uemodel, but this gate only
+    # imported meshes. Their unit tests stub bpy, so nothing proved the two formats reach a
+    # real Blender scene with FMODEL_TARGET_SKELETON intact.
+    #
+    # Both need a skeleton to bind to: create_anim asserts on an armature and reads it from
+    # options.override_skeleton or the active object. The armature imported just above is
+    # the one the fixtures target, so reuse it rather than inventing a second path.
+    from io_scene_ueformat.options import UEAnimOptions, UEPoseOptions  # noqa: E402
+
+    armature = created
+    if armature.type != "ARMATURE":
+        raise AssertionError("fixture did not produce the armature the animation targets")
+    bpy.context.view_layer.objects.active = armature
+
+    anim_path = FIXTURES / "fmodel_target_skeleton.ueanim"
+    if not anim_path.is_file():
+        raise AssertionError(f"required animation fixture is missing: {anim_path}")
+    anim_importer = UEFormatImport(
+        UEAnimOptions(link=True, enable_fmodel_extensions=True)
+    )
+    # For animation and pose files the first return value is the created Action itself;
+    # the DTO carries curve data, not the Blender datablock.
+    anim_created, anim_dto = anim_importer.import_file_with_dto(anim_path)
+    action = anim_created
+    # A Blender Action has no `type` attribute, so the old check could never pass.
+    # Blender 5.x Actions are layered and expose `id_type` instead of `fcurves`; test the
+    # datablock by the identity field it does carry.
+    if action is None or getattr(action, "id_type", None) not in {"ACTION", "UNSPECIFIED"}:
+        raise AssertionError(
+            f".ueanim import returned {action!r} instead of an Action"
+        )
+    encoded = action.get("fmodel_target_skeleton_identity")
+    if encoded is None:
+        raise AssertionError(
+            "imported action lost fmodel_target_skeleton_identity; "
+            "FMODEL_TARGET_SKELETON did not survive the .ueanim import"
+        )
+    anim_identity = json.loads(encoded)
+    if not anim_identity.get("skeleton_path"):
+        raise AssertionError(".ueanim identity carries no skeleton_path")
+    report["ueanim_target_skeleton"] = "ok"
+    report["ueanim_identity_path"] = anim_identity["skeleton_path"]
+
+    pose_path = FIXTURES / "fmodel_target_skeleton.uepose"
+    if not pose_path.is_file():
+        raise AssertionError(f"required pose fixture is missing: {pose_path}")
+    pose_importer = UEFormatImport(
+        UEPoseOptions(link=True, enable_fmodel_extensions=True)
+    )
+    pose_created, pose_dto = pose_importer.import_file_with_dto(pose_path)
+    # create_pose applies the pose directly to the armature's mesh and returns None by
+    # design; the identity lands on the mesh object, not on an Action.
+    if pose_created is not None:
+        raise AssertionError(
+            f".uepose import returned {pose_created!r}; it should apply in place"
+        )
+    from io_scene_ueformat.importer.utils import get_armature_mesh
+
+    pose_mesh = get_armature_mesh(armature)
+    if pose_mesh is None:
+        raise AssertionError(".uepose import did not resolve the armature mesh")
+    pose_encoded = pose_mesh.get("fmodel_target_pose_identity")
+    if pose_encoded is None:
+        raise AssertionError(
+            "imported mesh lost fmodel_target_pose_identity; "
+            "FMODEL_TARGET_SKELETON did not survive the .uepose import"
+        )
+    pose_identity = json.loads(pose_encoded)
+    if not pose_identity.get("skeleton_path"):
+        raise AssertionError(".uepose identity carries no skeleton_path")
+    report["uepose_target_skeleton"] = "ok"
+    report["uepose_identity_path"] = pose_identity["skeleton_path"]
 finally:
     io_scene_ueformat.unregister()
 
