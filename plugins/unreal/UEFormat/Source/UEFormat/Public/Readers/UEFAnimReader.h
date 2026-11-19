@@ -1,64 +1,28 @@
-﻿// Copyright © 2025 Marcel K. All rights reserved.
-
 #pragma once
-#include <fstream>
-#include "UEFModelReader.h"
-#include "Containers/Array.h"
-#include "Math/Quat.h"
 
-struct FFloatKey
-{
-	int32 Frame;
-	float FloatValue;
-};
-struct FVectorKey
-{
-	int32 Frame;
-	FVector3f VectorValue;
-};
-struct FQuatKey
-{
-	int32 Frame;
-	FQuat4f QuatValue;
-};
-struct FCurve
-{
-	std::string CurveName;
-	TArray<FFloatKey> CurveKeys;
-};
-struct FTrack
-{
-	std::string TrackName;
-	TArray<FVectorKey> TrackPosKeys;
-	TArray<FQuatKey> TrackRotKeys;
-	TArray<FVectorKey> TrackScaleKeys;
-};
+#include "CoreMinimal.h"
+#include "Data/UEAnimData.h"
+#include "Data/UEFormatHeader.h"
+#include <string>
 
 class UEFORMAT_API UEFAnimReader
 {
 public:
 	UEFAnimReader(const FString Filename);
-	~UEFAnimReader();
-	
+
 	bool Read();
-	
+
 	FUEFormatHeader Header;
 
-	int32 NumFrames;
-	float FramesPerSecond;
+	int32 NumFrames = 0;
+	float FramesPerSecond = 0.f;
 	std::string RefPosePath;
-	EAdditiveAnimationType AdditiveAnimType;
-	EAdditiveBasePoseType RefPoseType;
-	int32 RefFrameIndex;
+	EAdditiveAnimationType AdditiveAnimType = AAT_None;
+	EAdditiveBasePoseType RefPoseType = ABPT_None;
+	int32 RefFrameIndex = 0;
 	TArray<FTrack> Tracks;
 	TArray<FCurve> Curves;
 
 private:
-	const std::string GMAGIC = "UEFORMAT";
-	const std::string GZIP = "GZIP";
-	const std::string ZSTD = "ZSTD";
-	const std::string ANIM_IDENTIFIER = "UEANIM";
-	
-	std::ifstream Ar;
-	void ReadBuffer(const char* Buffer, int BufferSize);
+	FString Filename;
 };

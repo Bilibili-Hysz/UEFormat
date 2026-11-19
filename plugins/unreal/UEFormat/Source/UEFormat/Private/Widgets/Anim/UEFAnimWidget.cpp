@@ -1,5 +1,3 @@
-// Copyright © 2025 Marcel K. All rights reserved.
-
 #include "Widgets/Anim/UEFAnimWidget.h"
 #include "SPrimaryButton.h"
 #include "SlateOptMacros.h"
@@ -40,9 +38,6 @@ void UEFAnimWidget::Construct(const FArguments& InArgs)
 		]
 		]
 
-	// Data row struct
-	// Curve interpolation
-	// Details panel
 	+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(2)
@@ -83,7 +78,6 @@ void UEFAnimWidget::Construct(const FArguments& InArgs)
 		]
 		]
 		]
-	// Apply/Apply to All/Cancel
 		];
 
 

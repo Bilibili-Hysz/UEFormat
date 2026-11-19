@@ -1,5 +1,3 @@
-﻿// Copyright © 2025 Marcel K. All rights reserved.
-
 #include "Factories/UEFAnimFactory.h"
 #include "ComponentReregisterContext.h"
 #include "Animation/AnimSequence.h"
@@ -34,7 +32,6 @@ UObject* UEFAnimFactory::FactoryCreateFile(UClass* Class, UObject* Parent, FName
 	if (!Data.Read())
 		return nullptr;
 
-	//Ui
 	if (SettingsImporter->bInitialized == false)
 	{
 		TSharedPtr<UEFAnimWidget> ImportOptionsWindow;
@@ -69,7 +66,6 @@ UObject* UEFAnimFactory::FactoryCreateFile(UClass* Class, UObject* Parent, FName
 	FScopedSlowTask ImportTask(Data.Tracks.Num(), FText::FromString("Importing UEAnim Animation"));
 	ImportTask.MakeDialog(false);
 
-	//Import Tracks
 	for (const auto& Track : Data.Tracks)
 	{
 		ImportTask.EnterProgressFrame();
@@ -93,7 +89,6 @@ UObject* UEFAnimFactory::FactoryCreateFile(UClass* Class, UObject* Parent, FName
 		int PosIndex = 0, RotIndex = 0, ScaleIndex = 0;
 		for (auto j = 0; j < Data.NumFrames; j++)
 		{
-			//position keys
 			if (PosIndex < PosKeys.Num() && PosKeys[PosIndex].Frame == j)
 			{
 				FinalPosKeys[j] = PosKeys[PosIndex].VectorValue;
@@ -103,7 +98,6 @@ UObject* UEFAnimFactory::FactoryCreateFile(UClass* Class, UObject* Parent, FName
 			else
 				FinalPosKeys[j] = PrevPos;
 			
-			//rotation keys
 			if (RotIndex < RotKeys.Num() && RotKeys[RotIndex].Frame == j)
 			{
 				FinalRotKeys[j] = RotKeys[RotIndex].QuatValue;
@@ -113,7 +107,6 @@ UObject* UEFAnimFactory::FactoryCreateFile(UClass* Class, UObject* Parent, FName
 			else
 				FinalRotKeys[j] = PrevRot;
 
-			//scale keys
 			if (ScaleIndex < ScaleKeys.Num() && ScaleKeys[ScaleIndex].Frame == j)
 			{
 				FinalScaleKeys[j] = ScaleKeys[ScaleIndex].VectorValue;
@@ -128,7 +121,6 @@ UObject* UEFAnimFactory::FactoryCreateFile(UClass* Class, UObject* Parent, FName
 		Controller.SetBoneTrackKeys(BoneName, FinalPosKeys, FinalRotKeys, FinalScaleKeys);
 	}
 
-	//Import Curves
 	for (auto i = 0; i < Data.Curves.Num(); i++)
 	{
 		ImportTask.EnterProgressFrame();
@@ -137,7 +129,7 @@ UObject* UEFAnimFactory::FactoryCreateFile(UClass* Class, UObject* Parent, FName
 		for (const auto& Key : Data.Curves[i].CurveKeys)
 		{
 			FRichCurveKey RichKey;
-			RichKey.Time = Key.Frame / Data.FramesPerSecond; //Time is in seconds
+			RichKey.Time = Key.Frame / Data.FramesPerSecond;
 			RichKey.Value = Key.FloatValue;
 			RichCurves.Add(RichKey);
 		}

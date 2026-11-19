@@ -1,5 +1,3 @@
-// Copyright © 2025 Marcel K. All rights reserved.
-
 #pragma once
 #include "CoreMinimal.h"
 #include "UEFAnimImportOptions.h"
@@ -22,25 +20,20 @@ public:
 
 	UEFAnimWidget() : UserDlgResponse(UEFAnimImportOptionDlgResponse::Cancel)
 	{}
-	/** Constructs this widget with InArgs */
 	void Construct(const FArguments& InArgs);
 
-	/** A property view to edit advanced options */
 	TSharedPtr< class IDetailsView > PropertyView;
 
 	UPROPERTY(Category = MapsAndSets, EditAnywhere)
 	mutable UEFAnimImportOptions* Stun;
 
 	bool bShouldImportAll;
-	/** If we should import */
 	bool ShouldImport();
 
-	/** If the current settings should be applied to all items being imported */
 	bool ShouldImportAll();
 
 
 	FReply OnImportAll();
-	/** Called when 'Apply' button is pressed */
 	FReply OnImport();
 
 	FReply OnCancel();
@@ -48,6 +41,5 @@ private:
 	UEFAnimImportOptionDlgResponse	UserDlgResponse;
 	FReply HandleImport();
 
-	/** Window that owns us */
 	TWeakPtr< SWindow >	WidgetWindow;
 };

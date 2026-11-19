@@ -1,5 +1,3 @@
-// Copyright © 2025 Marcel K. All rights reserved.
-
 #include "Factories/UEFModelFactory.h"
 #include "StaticMeshAttributes.h"
 #include "Engine/StaticMesh.h"
@@ -23,11 +21,9 @@ UEFModelFactory::UEFModelFactory(const FObjectInitializer& ObjectInitializer) : 
 UObject* UEFModelFactory::FactoryCreateFile(UClass* Class, UObject* Parent, FName Name, EObjectFlags Flags, const FString& Filename, const TCHAR* Params, FFeedbackContext* Warn, bool& bOutOperationCanceled)
 {
 	UEFModelReader Data = UEFModelReader(Filename);
-	//empty mesh
 	if (!Data.Read() || Data.LODs.Num() == 0)
 		return nullptr;
 
-	//skeletal mesh
 	if (Data.Skeleton.Bones.Num() > 0)
 	{
 		USkeletalMesh* SkeletalMesh = CreateSkeletalMesh(Data.LODs, Data.Skeleton, Parent, Name, Flags);
@@ -36,7 +32,7 @@ UObject* UEFModelFactory::FactoryCreateFile(UClass* Class, UObject* Parent, FNam
 		FAssetRegistryModule::AssetCreated(SkeletalMesh);
 		return SkeletalMesh;
 	}
-	else //static mesh
+	else
 	{
 		UStaticMesh* StaticMesh = CreateStaticMesh(Data.LODs, Parent, Name, Flags);
 
@@ -48,7 +44,6 @@ UObject* UEFModelFactory::FactoryCreateFile(UClass* Class, UObject* Parent, FNam
 
 void UEFModelFactory::PopulateMeshDescription(FMeshDescription& MeshDesc, FLODData& Data)
 {
-	// Reserve space
 	MeshDesc.ReserveNewVertices(Data.Vertices.Num());
 	MeshDesc.ReserveNewVertexInstances(Data.Vertices.Num());
 	MeshDesc.ReserveNewPolygons(Data.Indices.Num() / 3);
@@ -266,6 +261,16 @@ USkeletalMesh* UEFModelFactory::CreateSkeletalMesh(TArray<FLODData>& LODData, FS
 
 	SkeletalMesh->SetSkeleton(Skeleton);
 	Skeleton->MergeAllBonesToBoneTree(SkeletalMesh);
+	
+	for (const auto& VirtualBone : SkeletonData.VirtualBones)
+	{
+		Skeleton->AddNewNamedVirtualBone(
+			VirtualBone.SourceBoneName.c_str(),
+			VirtualBone.TargetBoneName.c_str(),
+			VirtualBone.VirtualBoneName.c_str()
+		);
+	}
+	
 	Skeleton->SetPreviewMesh(SkeletalMesh);
 
 	Skeleton->PostEditChange();
@@ -288,7 +293,7 @@ USkeleton* UEFModelFactory::CreateSkeleton(FString Name, UObject* Parent, EObjec
 		FTransform Transform;
 		Transform.SetLocation(FVector(Bone.BonePos));
 		Transform.SetRotation(FQuat(Bone.BoneRot));
-		Transform.SetScale3D(FVector(1, 1, 1));
+		Transform.SetScale3D(FVector(Bone.BoneScale));
 
 		FMeshBoneInfo BoneInfo(Bone.BoneName.c_str(), Bone.BoneName.c_str(), Bone.BoneParentIndex);
 		RefSkeletonModifier.Add(BoneInfo, FTransform(Transform));
@@ -303,10 +308,7 @@ USkeleton* UEFModelFactory::CreateSkeleton(FString Name, UObject* Parent, EObjec
 		NewSocket->RelativeRotation = FQuat(Socket.SocketRot).Rotator();
 		NewSocket->RelativeScale = FVector(Socket.SocketScale);
 		Skeleton->Sockets.Add(NewSocket);
-	}
-
-	for (const auto& VirtualBone : Data.VirtualBones)
-		Skeleton->AddNewNamedVirtualBone(VirtualBone.SourceBoneName.c_str(), VirtualBone.TargetBoneName.c_str(), VirtualBone.VirtualBoneName.c_str());	
+	}	
 	
 	return Skeleton;
 }

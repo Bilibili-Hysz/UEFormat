@@ -152,3 +152,9 @@ This repository remains a working fork of
 and plugin work remains credited to its maintainers. This edition adds the
 FModel-specific export/import contract, provenance, URI safety, scene
 transaction handling and parity verification.
+
+## Format Specification
+- [Generic](docs/generic.md)
+- [UEModel](docs/uemodel.md)
+- [UEAnim](docs/ueanim.md)
+- [UEPose](docs/uepose.md)

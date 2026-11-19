@@ -61,9 +61,9 @@ This is **not** the same as `FDataChunk.Count`. Most mesh arrays rely on the chu
 ```csharp
 struct FUEFormatHeader
 {
-    uint8[8] Magic; // "UEFORMAT"
+    byte[8] Magic; // "UEFORMAT"
     FString Identifier; // "UEMODEL" | "UEANIM" | "UEPOSE"
-    uint8 FileVersion;
+    byte FileVersion;
     FString ObjectName;
     bool IsCompressed;
 }
