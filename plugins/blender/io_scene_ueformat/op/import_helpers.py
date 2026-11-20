@@ -20,6 +20,34 @@ def _set_last_import_report(settings, summary: str, report: str, *, status: str)
     settings.last_import_status = status
 
 
+def _require_created_asset(
+    options_class: type[UEFormatOptions],
+    created,
+    path: Path,
+) -> None:
+    """Fail when an import that must produce an asset produced nothing.
+
+    import_file() returns None for more than one reason. A pose import is
+    genuinely object-less: it mutates the target armature or shape keys in place,
+    so None is its success value. A model import only returns None when no object
+    was created - a structurally valid .uemodel whose LODS array is empty parses
+    fine and then has nothing to build. Reporting that as a successful import told
+    the user a file loaded when nothing appeared, with no diagnostic explaining
+    why. Raising here routes it through the existing failure path so the report
+    names the actual cause.
+    """
+
+    if created is not None:
+        return
+    if options_class is UEPoseOptions:
+        return
+    kind = "Model" if options_class is UEModelOptions else "Animation"
+    raise ValueError(
+        f"{kind} import produced no asset for {path.name}: the file parsed but "
+        "carries nothing to create (for a model, its LOD list is empty)"
+    )
+
+
 class UFImportBase(Operator, ImportHelper, Generic[T]):
     bl_context = "scene"
     files: CollectionProperty(
@@ -40,7 +68,10 @@ class UFImportBase(Operator, ImportHelper, Generic[T]):
             file: OperatorFileListElement
             path = directory / file.name
             try:
-                UEFormatImport(options, creation_tracker=capture).import_file(path)
+                created = UEFormatImport(
+                    options, creation_tracker=capture
+                ).import_file(path)
+                _require_created_asset(self.options_class, created, path)
             except Exception as error:
                 capture.rollback()
                 kind = {
